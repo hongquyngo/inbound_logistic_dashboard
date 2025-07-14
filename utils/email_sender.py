@@ -144,6 +144,27 @@ class InboundEmailSender:
             except Exception as e:
                 logger.error(f"Error creating Excel attachment: {e}")
             
+            # Create ICS calendar attachment for critical alerts
+            try:
+                calendar_gen = InboundCalendarGenerator()
+                ics_content = calendar_gen.create_critical_alerts_ics(
+                    overdue_pos, 
+                    pending_stockin, 
+                    self.sender_email
+                )
+                
+                if ics_content:
+                    ics_part = MIMEBase('text', 'calendar')
+                    ics_part.set_payload(ics_content.encode('utf-8'))
+                    encoders.encode_base64(ics_part)
+                    ics_part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="critical_alerts_{datetime.now().strftime("%Y%m%d")}.ics"'
+                    )
+                    msg.attach(ics_part)
+            except Exception as e:
+                logger.warning(f"Error creating calendar attachment: {e}")
+            
             # Send email
             return self._send_email(msg, recipient_email, cc_emails)
             
@@ -265,6 +286,28 @@ class InboundEmailSender:
                     msg.attach(excel_part)
             except Exception as e:
                 logger.error(f"Error creating Excel attachment: {e}")
+            
+            # Create ICS calendar attachment
+            try:
+                calendar_gen = InboundCalendarGenerator()
+                ics_content = calendar_gen.create_customs_clearance_ics(
+                    po_df,
+                    can_df,
+                    self.sender_email,
+                    weeks_ahead=weeks_ahead
+                )
+                
+                if ics_content:
+                    ics_part = MIMEBase('text', 'calendar')
+                    ics_part.set_payload(ics_content.encode('utf-8'))
+                    encoders.encode_base64(ics_part)
+                    ics_part.add_header(
+                        'Content-Disposition',
+                        f'attachment; filename="customs_clearance_{datetime.now().strftime("%Y%m%d")}.ics"'
+                    )
+                    msg.attach(ics_part)
+            except Exception as e:
+                logger.warning(f"Error creating calendar attachment: {e}")
             
             # Send email
             return self._send_email(msg, recipient_email, cc_emails)
@@ -535,6 +578,58 @@ class InboundEmailSender:
                 </div>
             """
         
+        # Add calendar buttons
+        calendar_gen = InboundCalendarGenerator()
+        google_cal_links = calendar_gen.create_google_calendar_links(po_df)
+        outlook_cal_links = calendar_gen.create_outlook_calendar_links(po_df)
+        
+        # Show calendar links
+        html += """
+            <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
+                <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
+                
+                <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+        """
+        
+        # Add individual date links (show first 5)
+        for i, gcal_link in enumerate(google_cal_links[:5]):
+            date_str = gcal_link['date'].strftime('%b %d')
+            is_urgent = gcal_link.get('is_urgent', False)
+            date_style = 'color: #d32f2f; font-weight: bold;' if is_urgent else 'font-weight: bold;'
+            
+            html += f"""
+                    <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
+                        <span style="{date_style} display: inline-block; width: 80px;">{date_str}:</span>
+                        <a href="{gcal_link['link']}" target="_blank" 
+                           style="margin: 0 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
+                           📅 Google Calendar
+                        </a>
+                        <a href="{outlook_cal_links[i]['link']}" target="_blank" 
+                           style="margin: 0 15px; color: #0078d4; text-decoration: none; font-weight: 500;">
+                           📅 Outlook
+                        </a>
+                    </div>
+            """
+        
+        if len(google_cal_links) > 5:
+            html += f"""
+                    <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: center;">
+                        <p style="font-style: italic; color: #999; margin: 0;">
+                            ... and {len(google_cal_links) - 5} more dates
+                        </p>
+                    </div>
+            """
+        
+        html += """
+                </div>
+                
+                <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
+                    Or download the attached .ics file to import all dates into any calendar application
+                </p>
+            </div>
+        """
+        
         # Add action items
         html += """
             <div style="margin-top: 20px; padding: 15px; background-color: #e3f2fd; border-radius: 5px;">
@@ -634,6 +729,13 @@ class InboundEmailSender:
                 .days-overdue {{
                     color: #d32f2f;
                     font-weight: bold;
+                }}
+                .action-box {{
+                    background-color: #e3f2fd;
+                    border: 1px solid #2196f3;
+                    border-radius: 5px;
+                    padding: 15px;
+                    margin: 20px 0;
                 }}
                 .footer {{
                     margin-top: 30px;
@@ -770,13 +872,19 @@ class InboundEmailSender:
         
         # Action Items
         html += """
-            <div style="margin-top: 20px; padding: 15px; background-color: #e3f2fd; border-radius: 5px;">
+            <div class="action-box">
                 <h4>📋 Required Actions:</h4>
                 <ol>
                     <li><strong>Overdue POs:</strong> Contact vendors immediately for updated ETDs</li>
                     <li><strong>Pending Stock-in:</strong> Prioritize warehouse processing for aged items</li>
                     <li><strong>Escalation:</strong> Items overdue > 14 days should be escalated to management</li>
                 </ol>
+                
+                <div style="margin: 20px 0; padding: 15px; background-color: #fff3cd; border: 1px solid #ffeeba; border-radius: 5px;">
+                    <h4 style="margin-top: 0;">📅 Calendar Reminder</h4>
+                    <p>An urgent calendar event has been created for today at 9:00 AM.</p>
+                    <p style="margin-bottom: 0;">Import the attached .ics file to receive alerts about these critical issues.</p>
+                </div>
                 
                 <p><strong>Procurement Team Contact:</strong><br>
                 📧 Email: procurement@prostech.vn<br>
@@ -949,6 +1057,25 @@ class InboundEmailSender:
                     """
                 
                 html += "</table></div>"
+        
+        # Add calendar reminder
+        html += """
+            <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                <h3 style="margin-top: 0; color: #333;">📅 Set Processing Reminders</h3>
+                <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <p style="margin: 0 0 15px 0;">The attached .ics calendar file contains a daily reminder for processing pending stock-in items.</p>
+                    <p style="margin: 0 0 20px 0;">Import it to your calendar to receive automatic alerts about urgent items requiring attention.</p>
+                    
+                    <div style="padding: 15px; background-color: #e8f5e9; border-radius: 5px;">
+                        <p style="margin: 0 0 10px 0;"><strong>Reminder Schedule:</strong></p>
+                        <ul style="margin: 0; padding-left: 20px;">
+                            <li style="margin-bottom: 5px;">⏰ Daily at 8:30 AM - Review pending items</li>
+                            <li>🔔 Alert 15 minutes before - Prepare for processing</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        """
         
         # Add recommendations
         html += """
@@ -1276,6 +1403,80 @@ class InboundEmailSender:
                     html += "</table>"
                 
                 html += "</div>"
+        
+        # Add calendar information with links
+        calendar_gen = InboundCalendarGenerator()
+        google_links = calendar_gen.create_customs_google_calendar_links(po_df, can_df)
+        outlook_links = calendar_gen.create_customs_outlook_calendar_links(po_df, can_df)
+        
+        html += """
+            <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                <h3 style="margin-top: 0; color: #333;">📅 Customs Calendar Events</h3>
+                <p style="color: #666; margin-bottom: 20px;">Click below to add customs clearance events to your calendar:</p>
+                
+                <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+        """
+        
+        # Show first 5 calendar links
+        if google_links:
+            for i, g_link in enumerate(google_links[:5]):
+                o_link = outlook_links[i] if i < len(outlook_links) else None
+                date_str = g_link['date'].strftime('%b %d')
+                event_type = g_link['type']
+                country = g_link['country']
+                
+                type_emoji = "📅" if event_type == "PO" else "📦"
+                type_text = "PO ETD" if event_type == "PO" else "CAN Arrival"
+                
+                html += f"""
+                        <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
+                            <span style="font-weight: bold; display: inline-block; width: 80px;">{date_str}:</span>
+                            <span style="color: #666; font-size: 14px;">{type_emoji} {type_text} - {country}</span>
+                            <div style="margin-top: 5px; margin-left: 80px;">
+                                <a href="{g_link['link']}" target="_blank" 
+                                   style="margin-right: 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
+                                   📅 Google Calendar
+                                </a>
+                """
+                
+                if o_link:
+                    html += f"""
+                                <a href="{o_link['link']}" target="_blank" 
+                                   style="color: #0078d4; text-decoration: none; font-weight: 500;">
+                                   📅 Outlook
+                                </a>
+                    """
+                
+                html += """
+                            </div>
+                        </div>
+                """
+            
+            if len(google_links) > 5:
+                html += f"""
+                        <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: center;">
+                            <p style="font-style: italic; color: #999; margin: 0;">
+                                ... and {len(google_links) - 5} more events
+                            </p>
+                        </div>
+                """
+        
+        html += """
+                    <div style="margin-top: 20px; padding: 15px; background-color: #e0f2f1; border-radius: 5px;">
+                        <p style="margin: 0 0 10px 0;"><strong>Event Types:</strong></p>
+                        <ul style="margin: 0; padding-left: 20px;">
+                            <li style="margin-bottom: 5px;">📅 PO ETD - Morning events (8:00 AM - 12:00 PM)</li>
+                            <li style="margin-bottom: 5px;">📦 CAN Arrivals - Afternoon events (2:00 PM - 4:00 PM)</li>
+                            <li>⏰ Reminders set 1 day before for preparation</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
+                    Or download the attached .ics file to import all customs events into any calendar application
+                </p>
+            </div>
+        """
         
         # Add customs documentation reminder
         html += """

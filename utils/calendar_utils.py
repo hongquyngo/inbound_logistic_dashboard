@@ -574,7 +574,207 @@ END:VEVENT
                 'is_urgent': is_overdue
             })
         
-        return links
+    @staticmethod
+    def create_customs_google_calendar_links(po_df, can_df=None):
+        """Create Google Calendar links for customs clearance events"""
+        links = []
+        
+        # Process POs
+        if not po_df.empty:
+            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            # Group by ETD and country for better organization
+            grouped = po_df.groupby([po_df['etd'].dt.date, 'vendor_country_name'])
+            
+            for (etd_date, country), group_df in grouped:
+                # Format date and time
+                start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=8, minute=0)
+                end_dt = start_dt.replace(hour=12, minute=0)
+                
+                dates = f"{start_dt.strftime('%Y%m%dT%H%M%S')}/{end_dt.strftime('%Y%m%dT%H%M%S')}"
+                
+                po_count = group_df['po_number'].nunique()
+                total_value = group_df['outstanding_arrival_amount_usd'].sum()
+                
+                title = f"🛃 Customs: {po_count} POs from {country}"
+                
+                details = f"CUSTOMS CLEARANCE - {country}\n"
+                details += f"ETD: {etd_date.strftime('%B %d, %Y')}\n\n"
+                details += f"Total POs: {po_count}\n"
+                details += f"Total Value: ${total_value:,.0f}\n\n"
+                details += "REQUIRED DOCUMENTS:\n"
+                details += "• Commercial Invoice\n"
+                details += "• Packing List\n"
+                details += "• Certificate of Origin\n"
+                details += "• Bill of Lading\n"
+                
+                params = {
+                    'action': 'TEMPLATE',
+                    'text': title,
+                    'dates': dates,
+                    'details': details,
+                    'location': f"Customs Office - {country}",
+                    'sf': 'true'
+                }
+                
+                base_url = 'https://calendar.google.com/calendar/render'
+                link = f"{base_url}?{urllib.parse.urlencode(params)}"
+                
+                links.append({
+                    'date': etd_date,
+                    'country': country,
+                    'link': link,
+                    'count': po_count,
+                    'type': 'PO'
+                })
+        
+        # Process CANs
+        if can_df is not None and not can_df.empty:
+            can_df['arrival_date'] = pd.to_datetime(can_df['arrival_date'])
+            grouped = can_df.groupby([can_df['arrival_date'].dt.date, 'vendor_country_name'])
+            
+            for (arrival_date, country), group_df in grouped:
+                start_dt = datetime.combine(arrival_date, datetime.min.time()).replace(hour=14, minute=0)
+                end_dt = start_dt.replace(hour=16, minute=0)
+                
+                dates = f"{start_dt.strftime('%Y%m%dT%H%M%S')}/{end_dt.strftime('%Y%m%dT%H%M%S')}"
+                
+                can_count = group_df['arrival_note_number'].nunique()
+                total_value = group_df['pending_value_usd'].sum()
+                
+                title = f"🛃 Customs: {can_count} CANs from {country}"
+                
+                details = f"CONTAINER ARRIVAL CLEARANCE - {country}\n"
+                details += f"Arrival Date: {arrival_date.strftime('%B %d, %Y')}\n\n"
+                details += f"Total CANs: {can_count}\n"
+                details += f"Total Value: ${total_value:,.0f}\n\n"
+                details += "REQUIRED DOCUMENTS:\n"
+                details += "• Container Arrival Note\n"
+                details += "• Customs Declaration\n"
+                details += "• Quality Certificate\n"
+                
+                params = {
+                    'action': 'TEMPLATE',
+                    'text': title,
+                    'dates': dates,
+                    'details': details,
+                    'location': f"Customs Office - {country}",
+                    'sf': 'true'
+                }
+                
+                base_url = 'https://calendar.google.com/calendar/render'
+                link = f"{base_url}?{urllib.parse.urlencode(params)}"
+                
+                links.append({
+                    'date': arrival_date,
+                    'country': country,
+                    'link': link,
+                    'count': can_count,
+                    'type': 'CAN'
+                })
+        
+        return sorted(links, key=lambda x: x['date'])
+    
+    @staticmethod
+    def create_customs_outlook_calendar_links(po_df, can_df=None):
+        """Create Outlook Calendar links for customs clearance events"""
+        links = []
+        
+        # Process POs
+        if not po_df.empty:
+            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            grouped = po_df.groupby([po_df['etd'].dt.date, 'vendor_country_name'])
+            
+            for (etd_date, country), group_df in grouped:
+                start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=8, minute=0)
+                end_dt = start_dt.replace(hour=12, minute=0)
+                
+                startdt = start_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                enddt = end_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                
+                po_count = group_df['po_number'].nunique()
+                total_value = group_df['outstanding_arrival_amount_usd'].sum()
+                
+                subject = f"🛃 Customs: {po_count} POs from {country}"
+                
+                body = f"<h3>CUSTOMS CLEARANCE - {country}</h3>"
+                body += f"<p><strong>ETD:</strong> {etd_date.strftime('%B %d, %Y')}</p>"
+                body += f"<p><strong>Total POs:</strong> {po_count}<br>"
+                body += f"<strong>Total Value:</strong> ${total_value:,.0f}</p>"
+                body += "<h4>REQUIRED DOCUMENTS:</h4>"
+                body += "<ul>"
+                body += "<li>Commercial Invoice</li>"
+                body += "<li>Packing List</li>"
+                body += "<li>Certificate of Origin</li>"
+                body += "<li>Bill of Lading</li>"
+                body += "</ul>"
+                
+                params = {
+                    'subject': subject,
+                    'startdt': startdt,
+                    'enddt': enddt,
+                    'body': body,
+                    'location': f"Customs Office - {country}"
+                }
+                
+                base_url = 'https://outlook.live.com/calendar/0/deeplink/compose'
+                link = f"{base_url}?{urllib.parse.urlencode(params)}"
+                
+                links.append({
+                    'date': etd_date,
+                    'country': country,
+                    'link': link,
+                    'count': po_count,
+                    'type': 'PO'
+                })
+        
+        # Process CANs
+        if can_df is not None and not can_df.empty:
+            can_df['arrival_date'] = pd.to_datetime(can_df['arrival_date'])
+            grouped = can_df.groupby([can_df['arrival_date'].dt.date, 'vendor_country_name'])
+            
+            for (arrival_date, country), group_df in grouped:
+                start_dt = datetime.combine(arrival_date, datetime.min.time()).replace(hour=14, minute=0)
+                end_dt = start_dt.replace(hour=16, minute=0)
+                
+                startdt = start_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                enddt = end_dt.strftime('%Y-%m-%dT%H:%M:%S')
+                
+                can_count = group_df['arrival_note_number'].nunique()
+                total_value = group_df['pending_value_usd'].sum()
+                
+                subject = f"🛃 Customs: {can_count} CANs from {country}"
+                
+                body = f"<h3>CONTAINER ARRIVAL CLEARANCE - {country}</h3>"
+                body += f"<p><strong>Arrival Date:</strong> {arrival_date.strftime('%B %d, %Y')}</p>"
+                body += f"<p><strong>Total CANs:</strong> {can_count}<br>"
+                body += f"<strong>Total Value:</strong> ${total_value:,.0f}</p>"
+                body += "<h4>REQUIRED DOCUMENTS:</h4>"
+                body += "<ul>"
+                body += "<li>Container Arrival Note</li>"
+                body += "<li>Customs Declaration</li>"
+                body += "<li>Quality Certificate</li>"
+                body += "</ul>"
+                
+                params = {
+                    'subject': subject,
+                    'startdt': startdt,
+                    'enddt': enddt,
+                    'body': body,
+                    'location': f"Customs Office - {country}"
+                }
+                
+                base_url = 'https://outlook.live.com/calendar/0/deeplink/compose'
+                link = f"{base_url}?{urllib.parse.urlencode(params)}"
+                
+                links.append({
+                    'date': arrival_date,
+                    'country': country,
+                    'link': link,
+                    'count': can_count,
+                    'type': 'CAN'
+                })
+        
+        return sorted(links, key=lambda x: x['date'])
     
     @staticmethod
     def create_outlook_calendar_links(po_df):
