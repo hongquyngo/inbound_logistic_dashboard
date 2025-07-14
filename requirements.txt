@@ -1,0 +1,31 @@
+# requirements.txt for Outbound Logistics App
+
+# Core dependencies
+streamlit
+pandas
+numpy
+
+# Database
+sqlalchemy
+pymysql
+
+# Authentication
+python-dotenv
+
+# Data visualization
+plotly
+matplotlib
+seaborn
+
+# Excel handling
+openpyxl
+xlsxwriter
+
+# Email
+email-validator
+
+# Date handling
+python-dateutil
+
+# Other utilities
+requests
