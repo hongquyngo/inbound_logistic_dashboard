@@ -29,8 +29,7 @@ python-dateutil
 
 # Missing dependencies based on error
 reportlab # For PDF generation
-platypus  # ReportLab component
-simpledoctemplate  # ReportLab component
+
 
 # Other utilities
 requests
