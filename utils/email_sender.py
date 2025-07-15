@@ -37,6 +37,11 @@ class InboundEmailSender:
             if not self._validate_config():
                 return False, "Email configuration missing"
             
+            # Validate input data
+            if po_df is None or po_df.empty:
+                logger.warning(f"No PO data for {recipient_email}")
+                return False, "No PO data available"
+            
             # Create message
             msg = MIMEMultipart('alternative')
             
@@ -52,12 +57,16 @@ class InboundEmailSender:
             if cc_emails:
                 msg['Cc'] = ', '.join(cc_emails)
             
-            # Create HTML content
-            html_content = self._create_po_schedule_html(po_df, recipient_name, is_custom_recipient, weeks_ahead)
-            html_part = MIMEText(html_content, 'html')
-            msg.attach(html_part)
+            # Create HTML content with error handling
+            try:
+                html_content = self._create_po_schedule_html(po_df, recipient_name, is_custom_recipient, weeks_ahead)
+                html_part = MIMEText(html_content, 'html')
+                msg.attach(html_part)
+            except Exception as e:
+                logger.error(f"Error creating HTML content: {e}", exc_info=True)
+                return False, f"Error creating HTML content: {str(e)}"
             
-            # Create Excel attachment
+            # Create Excel attachment with better error handling
             try:
                 excel_data = self._create_po_schedule_excel(po_df, is_custom_recipient)
                 if excel_data:
@@ -68,8 +77,11 @@ class InboundEmailSender:
                     filename = f"po_schedule_{recipient_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
                     excel_part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
                     msg.attach(excel_part)
+                else:
+                    logger.warning("Excel attachment creation returned None")
             except Exception as e:
-                logger.error(f"Error creating Excel attachment: {e}")
+                logger.error(f"Error creating Excel attachment: {e}", exc_info=True)
+                # Continue without Excel attachment
             
             # Create calendar attachment
             try:
@@ -87,12 +99,13 @@ class InboundEmailSender:
                     msg.attach(ics_part)
             except Exception as e:
                 logger.warning(f"Error creating calendar attachment: {e}")
+                # Continue without calendar attachment
             
             # Send email
             return self._send_email(msg, recipient_email, cc_emails)
             
         except Exception as e:
-            logger.error(f"Error sending PO schedule email: {e}")
+            logger.error(f"Error sending PO schedule email: {e}", exc_info=True)
             return False, str(e)
     
     def send_critical_alerts_email(self, recipient_email: str, recipient_name: str,
@@ -106,6 +119,11 @@ class InboundEmailSender:
             # Extract data
             overdue_pos = data_dict.get('overdue_pos', pd.DataFrame())
             pending_stockin = data_dict.get('pending_stockin', pd.DataFrame())
+            
+            # Validate that at least one dataset has data
+            if (overdue_pos.empty or overdue_pos is None) and (pending_stockin.empty or pending_stockin is None):
+                logger.warning(f"No critical data for {recipient_email}")
+                return False, "No critical items found"
             
             # Create message
             msg = MIMEMultipart('alternative')
@@ -126,9 +144,13 @@ class InboundEmailSender:
                 msg['Cc'] = ', '.join(cc_emails)
             
             # Create HTML content
-            html_content = self._create_critical_alerts_html(data_dict, recipient_name, is_custom_recipient)
-            html_part = MIMEText(html_content, 'html')
-            msg.attach(html_part)
+            try:
+                html_content = self._create_critical_alerts_html(data_dict, recipient_name, is_custom_recipient)
+                html_part = MIMEText(html_content, 'html')
+                msg.attach(html_part)
+            except Exception as e:
+                logger.error(f"Error creating HTML content: {e}", exc_info=True)
+                return False, f"Error creating HTML content: {str(e)}"
             
             # Create Excel attachment
             try:
@@ -169,7 +191,7 @@ class InboundEmailSender:
             return self._send_email(msg, recipient_email, cc_emails)
             
         except Exception as e:
-            logger.error(f"Error sending critical alerts: {e}")
+            logger.error(f"Error sending critical alerts: {e}", exc_info=True)
             return False, str(e)
     
     def send_pending_stockin_email(self, recipient_email: str, recipient_name: str,
@@ -179,6 +201,11 @@ class InboundEmailSender:
         try:
             if not self._validate_config():
                 return False, "Email configuration missing"
+            
+            # Validate input data
+            if can_df is None or can_df.empty:
+                logger.warning(f"No pending stock-in data for {recipient_email}")
+                return False, "No pending stock-in items found"
             
             # Create message
             msg = MIMEMultipart('alternative')
@@ -197,9 +224,13 @@ class InboundEmailSender:
                 msg['Cc'] = ', '.join(cc_emails)
             
             # Create HTML content
-            html_content = self._create_pending_stockin_html(can_df, recipient_name, is_custom_recipient)
-            html_part = MIMEText(html_content, 'html')
-            msg.attach(html_part)
+            try:
+                html_content = self._create_pending_stockin_html(can_df, recipient_name, is_custom_recipient)
+                html_part = MIMEText(html_content, 'html')
+                msg.attach(html_part)
+            except Exception as e:
+                logger.error(f"Error creating HTML content: {e}", exc_info=True)
+                return False, f"Error creating HTML content: {str(e)}"
             
             # Create Excel attachment
             try:
@@ -236,7 +267,7 @@ class InboundEmailSender:
             return self._send_email(msg, recipient_email, cc_emails)
             
         except Exception as e:
-            logger.error(f"Error sending pending stock-in email: {e}")
+            logger.error(f"Error sending pending stock-in email: {e}", exc_info=True)
             return False, str(e)
     
     def send_customs_clearance_email(self, recipient_email: str, po_df: pd.DataFrame,
@@ -246,6 +277,11 @@ class InboundEmailSender:
         try:
             if not self._validate_config():
                 return False, "Email configuration missing"
+            
+            # Validate that at least one dataset has data
+            if (po_df is None or po_df.empty) and (can_df is None or can_df.empty):
+                logger.warning("No international shipments found")
+                return False, "No international shipments found"
             
             # Create message
             msg = MIMEMultipart('alternative')
@@ -269,9 +305,13 @@ class InboundEmailSender:
                 msg['Cc'] = ', '.join(cc_emails)
             
             # Create HTML content
-            html_content = self._create_customs_clearance_html(po_df, can_df, weeks_ahead)
-            html_part = MIMEText(html_content, 'html')
-            msg.attach(html_part)
+            try:
+                html_content = self._create_customs_clearance_html(po_df, can_df, weeks_ahead)
+                html_part = MIMEText(html_content, 'html')
+                msg.attach(html_part)
+            except Exception as e:
+                logger.error(f"Error creating HTML content: {e}", exc_info=True)
+                return False, f"Error creating HTML content: {str(e)}"
             
             # Create Excel attachment
             try:
@@ -313,7 +353,7 @@ class InboundEmailSender:
             return self._send_email(msg, recipient_email, cc_emails)
             
         except Exception as e:
-            logger.error(f"Error sending customs email: {e}")
+            logger.error(f"Error sending customs email: {e}", exc_info=True)
             return False, str(e)
     
     # Private helper methods
@@ -579,21 +619,44 @@ class InboundEmailSender:
             """
         
         # Add calendar buttons
-        calendar_gen = InboundCalendarGenerator()
-        google_cal_links = calendar_gen.create_google_calendar_links(po_df)
-        outlook_cal_links = calendar_gen.create_outlook_calendar_links(po_df)
+        try:
+            calendar_gen = InboundCalendarGenerator()
+            google_cal_links = calendar_gen.create_google_calendar_links(po_df)
+            outlook_cal_links = calendar_gen.create_outlook_calendar_links(po_df)
+        except Exception as e:
+            logger.warning(f"Error creating calendar links: {e}")
+            google_cal_links = None
+            outlook_cal_links = None
         
-        # Show calendar links
-        html += """
-            <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
-                <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
-                <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
+        # Show calendar links only if available
+        if google_cal_links and outlook_cal_links:
+            html += """
+                <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                    <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
+                    <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
+                    
+                    <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            """
+            
+            # Add individual date links (show first 5)
+            for i, gcal_link in enumerate(google_cal_links[:5]):
+                date_str = gcal_link['date'].strftime('%b %d')
+                is_urgent = gcal_link.get('is_urgent', False)
+                date_style = 'color: #d32f2f; font-weight: bold;' if is_urgent else 'font-weight: bold;'
                 
-                <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-        """
-        
-        # Add individual date links (show first 5)
-        for i, gcal_link in enumerate(google_cal_links[:5]):
+                html += f"""
+                        <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
+                            <span style="{date_style} display: inline-block; width: 80px;">{date_str}:</span>
+                            <a href="{gcal_link['link']}" target="_blank" 
+                               style="margin: 0 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
+                               📅 Google Calendar
+                            </a>
+                            <a href="{outlook_cal_links[i]['link']}" target="_blank" 
+                               style="margin: 0 15px; color: #0078d4; text-decoration: none; font-weight: 500;">
+                               📅 Outlook
+                            </a>
+                        </div>
+                """
             date_str = gcal_link['date'].strftime('%b %d')
             is_urgent = gcal_link.get('is_urgent', False)
             date_style = 'color: #d32f2f; font-weight: bold;' if is_urgent else 'font-weight: bold;'
@@ -886,9 +949,9 @@ class InboundEmailSender:
                     <p style="margin-bottom: 0;">Import the attached .ics file to receive alerts about these critical issues.</p>
                 </div>
                 
-                <p><strong>Inbound Team Contact:</strong><br>
-                📧 Email: Inbound@prostech.vn<br>
-                📞 Phone: +84 34 3088826</p>
+                <p><strong>Procurement Team Contact:</strong><br>
+                📧 Email: procurement@prostech.vn<br>
+                📞 Phone: +84 33 476273</p>
             </div>
             
             <div class="footer">
@@ -1405,21 +1468,57 @@ class InboundEmailSender:
                 html += "</div>"
         
         # Add calendar information with links
-        calendar_gen = InboundCalendarGenerator()
-        google_links = calendar_gen.create_customs_google_calendar_links(po_df, can_df)
-        outlook_links = calendar_gen.create_customs_outlook_calendar_links(po_df, can_df)
+        try:
+            calendar_gen = InboundCalendarGenerator()
+            google_links = calendar_gen.create_customs_google_calendar_links(po_df, can_df)
+            outlook_links = calendar_gen.create_customs_outlook_calendar_links(po_df, can_df)
+        except Exception as e:
+            logger.warning(f"Error creating calendar links: {e}")
+            google_links = None
+            outlook_links = None
         
-        html += """
-            <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
-                <h3 style="margin-top: 0; color: #333;">📅 Customs Calendar Events</h3>
-                <p style="color: #666; margin-bottom: 20px;">Click below to add customs clearance events to your calendar:</p>
-                
-                <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-        """
-        
-        # Show first 5 calendar links
-        if google_links:
+        if google_links and outlook_links:
+            html += """
+                <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                    <h3 style="margin-top: 0; color: #333;">📅 Customs Calendar Events</h3>
+                    <p style="color: #666; margin-bottom: 20px;">Click below to add customs clearance events to your calendar:</p>
+                    
+                    <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            """
+            
+            # Show first 5 calendar links
             for i, g_link in enumerate(google_links[:5]):
+                o_link = outlook_links[i] if i < len(outlook_links) else None
+                date_str = g_link['date'].strftime('%b %d')
+                event_type = g_link['type']
+                country = g_link['country']
+                
+                type_emoji = "📅" if event_type == "PO" else "📦"
+                type_text = "PO ETD" if event_type == "PO" else "CAN Arrival"
+                
+                html += f"""
+                        <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
+                            <span style="font-weight: bold; display: inline-block; width: 80px;">{date_str}:</span>
+                            <span style="color: #666; font-size: 14px;">{type_emoji} {type_text} - {country}</span>
+                            <div style="margin-top: 5px; margin-left: 80px;">
+                                <a href="{g_link['link']}" target="_blank" 
+                                   style="margin-right: 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
+                                   📅 Google Calendar
+                                </a>
+                """
+                
+                if o_link:
+                    html += f"""
+                                <a href="{o_link['link']}" target="_blank" 
+                                   style="color: #0078d4; text-decoration: none; font-weight: 500;">
+                                   📅 Outlook
+                                </a>
+                    """
+                
+                html += """
+                            </div>
+                        </div>
+                """
                 o_link = outlook_links[i] if i < len(outlook_links) else None
                 date_str = g_link['date'].strftime('%b %d')
                 event_type = g_link['type']
@@ -1460,23 +1559,33 @@ class InboundEmailSender:
                             </p>
                         </div>
                 """
-        
-        html += """
-                    <div style="margin-top: 20px; padding: 15px; background-color: #e0f2f1; border-radius: 5px;">
-                        <p style="margin: 0 0 10px 0;"><strong>Event Types:</strong></p>
-                        <ul style="margin: 0; padding-left: 20px;">
-                            <li style="margin-bottom: 5px;">📅 PO ETD - Morning events (8:00 AM - 12:00 PM)</li>
-                            <li style="margin-bottom: 5px;">📦 CAN Arrivals - Afternoon events (2:00 PM - 4:00 PM)</li>
-                            <li>⏰ Reminders set 1 day before for preparation</li>
-                        </ul>
+            
+            html += """
+                        <div style="margin-top: 20px; padding: 15px; background-color: #e0f2f1; border-radius: 5px;">
+                            <p style="margin: 0 0 10px 0;"><strong>Event Types:</strong></p>
+                            <ul style="margin: 0; padding-left: 20px;">
+                                <li style="margin-bottom: 5px;">📅 PO ETD - Morning events (8:00 AM - 12:00 PM)</li>
+                                <li style="margin-bottom: 5px;">📦 CAN Arrivals - Afternoon events (2:00 PM - 4:00 PM)</li>
+                                <li>⏰ Reminders set 1 day before for preparation</li>
+                            </ul>
+                        </div>
                     </div>
+                    
+                    <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
+                        Or download the attached .ics file to import all customs events into any calendar application
+                    </p>
                 </div>
-                
-                <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
-                    Or download the attached .ics file to import all customs events into any calendar application
-                </p>
-            </div>
-        """
+            """
+        else:
+            # If no calendar links available
+            html += """
+                <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                    <h3 style="margin-top: 0; color: #333;">📅 Calendar Integration</h3>
+                    <p style="color: #666; margin-bottom: 0;">
+                        Download the attached .ics file to import customs clearance events into your calendar application.
+                    </p>
+                </div>
+            """
         
         # Add customs documentation reminder
         html += """
@@ -1520,33 +1629,73 @@ class InboundEmailSender:
         return html
     
     # Excel creation methods
-    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False) -> io.BytesIO:
-        """Create Excel attachment for PO schedule"""
+    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False) -> Optional[io.BytesIO]:
+        """Create Excel attachment for PO schedule with better error handling"""
         output = io.BytesIO()
         
         try:
+            # Validate input
+            if po_df is None or po_df.empty:
+                logger.warning("Empty DataFrame provided to create Excel")
+                return None
+            
+            # Check for required columns
+            required_cols = ['vendor_name', 'po_number', 'pending_standard_arrival_quantity', 
+                           'outstanding_arrival_amount_usd', 'etd']
+            
+            missing_cols = [col for col in required_cols if col not in po_df.columns]
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                # Try to continue with available columns
+                po_df = po_df[[col for col in po_df.columns if col in required_cols]]
+            
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 # Sheet 1: PO Details
                 po_df.to_excel(writer, sheet_name='PO Details', index=False)
                 
-                # Sheet 2: Summary by Vendor
-                vendor_summary = po_df.groupby('vendor_name').agg({
-                    'po_number': 'nunique',
-                    'pending_standard_arrival_quantity': 'sum',
-                    'outstanding_arrival_amount_usd': 'sum'
-                }).reset_index()
-                vendor_summary.columns = ['Vendor', 'PO Count', 'Pending Quantity', 'Outstanding Value USD']
-                vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
+                # Sheet 2: Summary by Vendor (only if columns exist)
+                if all(col in po_df.columns for col in ['vendor_name', 'po_number', 
+                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']):
+                    vendor_summary = po_df.groupby('vendor_name').agg({
+                        'po_number': 'nunique',
+                        'pending_standard_arrival_quantity': 'sum',
+                        'outstanding_arrival_amount_usd': 'sum'
+                    }).reset_index()
+                    vendor_summary.columns = ['Vendor', 'PO Count', 'Pending Quantity', 'Outstanding Value USD']
+                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
                 
-                # Sheet 3: Weekly Timeline
-                po_df['week'] = pd.to_datetime(po_df['etd']).dt.to_period('W').dt.start_time
-                weekly_summary = po_df.groupby('week').agg({
-                    'po_number': 'nunique',
-                    'pending_standard_arrival_quantity': 'sum',
-                    'outstanding_arrival_amount_usd': 'sum'
-                }).reset_index()
-                weekly_summary.columns = ['Week Starting', 'PO Count', 'Total Quantity', 'Total Value USD']
-                weekly_summary.to_excel(writer, sheet_name='Weekly Timeline', index=False)
+                # Sheet 3: Weekly Timeline (only if etd exists)
+                if 'etd' in po_df.columns:
+                    po_df_copy = po_df.copy()
+                    po_df_copy['etd'] = pd.to_datetime(po_df_copy['etd'], errors='coerce')
+                    po_df_copy = po_df_copy.dropna(subset=['etd'])  # Remove invalid dates
+                    
+                    if not po_df_copy.empty:
+                        po_df_copy['week'] = po_df_copy['etd'].dt.to_period('W').dt.start_time
+                        
+                        # Check which columns are available for aggregation
+                        agg_dict = {}
+                        if 'po_number' in po_df_copy.columns:
+                            agg_dict['po_number'] = 'nunique'
+                        if 'pending_standard_arrival_quantity' in po_df_copy.columns:
+                            agg_dict['pending_standard_arrival_quantity'] = 'sum'
+                        if 'outstanding_arrival_amount_usd' in po_df_copy.columns:
+                            agg_dict['outstanding_arrival_amount_usd'] = 'sum'
+                        
+                        if agg_dict:
+                            weekly_summary = po_df_copy.groupby('week').agg(agg_dict).reset_index()
+                            
+                            # Rename columns based on what's available
+                            rename_dict = {'week': 'Week Starting'}
+                            if 'po_number' in agg_dict:
+                                rename_dict['po_number'] = 'PO Count'
+                            if 'pending_standard_arrival_quantity' in agg_dict:
+                                rename_dict['pending_standard_arrival_quantity'] = 'Total Quantity'
+                            if 'outstanding_arrival_amount_usd' in agg_dict:
+                                rename_dict['outstanding_arrival_amount_usd'] = 'Total Value USD'
+                            
+                            weekly_summary.rename(columns=rename_dict, inplace=True)
+                            weekly_summary.to_excel(writer, sheet_name='Weekly Timeline', index=False)
                 
                 # Add formatting
                 workbook = writer.book
@@ -1567,10 +1716,10 @@ class InboundEmailSender:
             return output
             
         except Exception as e:
-            logger.error(f"Error creating PO schedule Excel: {e}")
+            logger.error(f"Error creating PO schedule Excel: {e}", exc_info=True)
             return None
     
-    def _create_critical_alerts_excel(self, data_dict: Dict) -> io.BytesIO:
+    def _create_critical_alerts_excel(self, data_dict: Dict) -> Optional[io.BytesIO]:
         """Create Excel attachment for critical alerts"""
         output = io.BytesIO()
         
@@ -1603,14 +1752,18 @@ class InboundEmailSender:
             return output
             
         except Exception as e:
-            logger.error(f"Error creating critical alerts Excel: {e}")
+            logger.error(f"Error creating critical alerts Excel: {e}", exc_info=True)
             return None
     
-    def _create_pending_stockin_excel(self, can_df: pd.DataFrame) -> io.BytesIO:
+    def _create_pending_stockin_excel(self, can_df: pd.DataFrame) -> Optional[io.BytesIO]:
         """Create Excel attachment for pending stock-in"""
         output = io.BytesIO()
         
         try:
+            if can_df is None or can_df.empty:
+                logger.warning("Empty DataFrame provided for pending stock-in Excel")
+                return None
+                
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 # Sheet 1: All pending items
                 can_df.to_excel(writer, sheet_name='All Pending Items', index=False)
@@ -1629,16 +1782,17 @@ class InboundEmailSender:
                 age_summary.to_excel(writer, sheet_name='Age Summary', index=False)
                 
                 # Sheet 3: Vendor Summary
-                vendor_summary = can_df.groupby('vendor').agg({
-                    'arrival_note_number': 'nunique',
-                    'can_line_id': 'count',
-                    'pending_quantity': 'sum',
-                    'pending_value_usd': 'sum',
-                    'days_since_arrival': 'mean'
-                }).reset_index()
-                vendor_summary.columns = ['Vendor', 'CAN Count', 'Line Items', 'Total Quantity', 
-                                        'Total Value USD', 'Avg Days Pending']
-                vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
+                if 'vendor' in can_df.columns:
+                    vendor_summary = can_df.groupby('vendor').agg({
+                        'arrival_note_number': 'nunique',
+                        'can_line_id': 'count',
+                        'pending_quantity': 'sum',
+                        'pending_value_usd': 'sum',
+                        'days_since_arrival': 'mean'
+                    }).reset_index()
+                    vendor_summary.columns = ['Vendor', 'CAN Count', 'Line Items', 'Total Quantity', 
+                                            'Total Value USD', 'Avg Days Pending']
+                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
                 
                 # Add formatting
                 workbook = writer.book
@@ -1659,10 +1813,10 @@ class InboundEmailSender:
             return output
             
         except Exception as e:
-            logger.error(f"Error creating pending stock-in Excel: {e}")
+            logger.error(f"Error creating pending stock-in Excel: {e}", exc_info=True)
             return None
     
-    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None) -> io.BytesIO:
+    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None) -> Optional[io.BytesIO]:
         """Create Excel for customs clearance"""
         output = io.BytesIO()
         
@@ -1744,5 +1898,5 @@ class InboundEmailSender:
             return output
             
         except Exception as e:
-            logger.error(f"Error creating customs Excel: {e}")
+            logger.error(f"Error creating customs Excel: {e}", exc_info=True)
             return None

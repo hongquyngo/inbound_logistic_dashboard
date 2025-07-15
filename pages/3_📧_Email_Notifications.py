@@ -143,6 +143,45 @@ def get_creators_overdue():
         st.error(f"Error loading overdue creators: {e}")
         return pd.DataFrame()
 
+# Get creators with pending stock-in items
+@st.cache_data(ttl=300)
+def get_creators_with_pending_cans():
+    """Get list of creators with pending stock-in items"""
+    try:
+        query = text("""
+        SELECT DISTINCT 
+            e.id,
+            e.keycloak_id,
+            CONCAT(e.first_name, ' ', e.last_name) as name,
+            e.email,
+            COUNT(DISTINCT can.arrival_note_number) as pending_cans,
+            SUM(can.pending_quantity) as total_pending_qty,
+            SUM(can.pending_value_usd) as total_pending_value,
+            MAX(can.days_since_arrival) as max_days_pending,
+            COUNT(DISTINCT CASE WHEN can.days_since_arrival > 7 THEN can.arrival_note_number END) as urgent_cans,
+            COUNT(DISTINCT CASE WHEN can.days_since_arrival > 14 THEN can.arrival_note_number END) as critical_cans,
+            e.manager_id,
+            m.email as manager_email,
+            CONCAT(m.first_name, ' ', m.last_name) as manager_name
+        FROM employees e
+        LEFT JOIN employees m ON e.manager_id = m.id
+        INNER JOIN purchase_order_full_view po ON po.created_by = e.email
+        INNER JOIN can_tracking_full_view can ON can.po_number = po.po_number
+        WHERE can.pending_quantity > 0
+        GROUP BY e.id, e.keycloak_id, e.first_name, e.last_name, 
+                 e.email, e.manager_id, m.email, m.first_name, m.last_name
+        ORDER BY urgent_cans DESC, total_pending_value DESC
+        """)
+        
+        engine = data_loader.engine
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+        return df
+    except Exception as e:
+        logger.error(f"Error loading creators with pending CANs: {e}")
+        st.error(f"Error loading creators with pending CANs: {e}")
+        return pd.DataFrame()
+
 # Initialize session state for notification type if not exists
 if 'notification_type' not in st.session_state:
     st.session_state.notification_type = '📅 PO Schedule'
@@ -194,11 +233,14 @@ with col2:
         ["Send Now", "Preview Only"],
         index=1
     )
+# Continuation of Email_Notifications.py - Part 2
 
 # Now load creators data based on notification type
 creators_df = pd.DataFrame()  # Initialize empty
 if notification_type == "🚨 Critical Alerts":
     creators_df = get_creators_overdue()
+elif notification_type == "📦 Pending Stock-in":
+    creators_df = get_creators_with_pending_cans()
 elif notification_type != "🛃 Custom Clearance":
     creators_df = get_creators_list(weeks_ahead)
 
@@ -254,6 +296,10 @@ with col1:
                     total_overdue = creators_df['overdue_pos'].sum()
                     total_pending_cans = creators_df['pending_cans'].sum()
                     st.info(f"Will send to {len(selected_creators)} creators with {total_overdue} overdue POs and {total_pending_cans} pending CANs")
+                elif notification_type == "📦 Pending Stock-in":
+                    total_pending_cans = creators_df['pending_cans'].sum() if 'pending_cans' in creators_df.columns else 0
+                    total_urgent = creators_df['urgent_cans'].sum() if 'urgent_cans' in creators_df.columns else 0
+                    st.info(f"Will send to {len(selected_creators)} creators with {total_pending_cans} pending CANs ({total_urgent} urgent)")
                 else:
                     st.info(f"Will send to all {len(selected_creators)} PO creators")
                     
@@ -263,6 +309,12 @@ with col1:
                     def format_func(x):
                         creator = creators_df[creators_df['name']==x].iloc[0]
                         return f"{x} (Overdue POs: {creator['overdue_pos']}, Pending CANs: {creator['pending_cans']})"
+                elif notification_type == "📦 Pending Stock-in":
+                    def format_func(x):
+                        creator = creators_df[creators_df['name']==x].iloc[0]
+                        urgent = creator.get('urgent_cans', 0)
+                        total_value = creator.get('total_pending_value', 0)
+                        return f"{x} ({creator['pending_cans']} CANs, {urgent} urgent, ${total_value/1000:.0f}K)"
                 else:
                     def format_func(x):
                         creator = creators_df[creators_df['name']==x].iloc[0]
@@ -321,6 +373,26 @@ with col1:
                 if notification_type == "🚨 Critical Alerts":
                     display_df = selected_df[['name', 'email', 'overdue_pos', 'pending_cans', 'max_days_overdue']].copy()
                     display_df.columns = ['Name', 'Email', 'Overdue POs', 'Pending CANs', 'Max Days Overdue']
+                elif notification_type == "📦 Pending Stock-in":
+                    # Display columns for pending stock-in
+                    display_cols = ['name', 'email', 'pending_cans', 'urgent_cans', 'total_pending_value', 'max_days_pending']
+                    display_cols = [col for col in display_cols if col in selected_df.columns]
+                    display_df = selected_df[display_cols].copy()
+                    
+                    # Rename columns
+                    rename_map = {
+                        'name': 'Name',
+                        'email': 'Email', 
+                        'pending_cans': 'Pending CANs',
+                        'urgent_cans': 'Urgent (>7 days)',
+                        'total_pending_value': 'Total Value',
+                        'max_days_pending': 'Max Days Pending'
+                    }
+                    display_df.rename(columns=rename_map, inplace=True)
+                    
+                    # Format value column
+                    if 'Total Value' in display_df.columns:
+                        display_df['Total Value'] = display_df['Total Value'].apply(lambda x: f"${x/1000:.0f}K")
                 else:
                     display_df = selected_df[['name', 'email', 'active_pos', 'total_outstanding_value', 'international_pos']].copy()
                     display_df['total_outstanding_value'] = display_df['total_outstanding_value'].apply(lambda x: f"${x/1000:.0f}K")
@@ -332,6 +404,8 @@ with col1:
         else:
             if notification_type == "🚨 Critical Alerts":
                 st.warning("No creators with overdue POs or pending CANs found")
+            elif notification_type == "📦 Pending Stock-in":
+                st.warning("No creators with pending stock-in items found")
             else:
                 st.warning("No creators with active POs found")
 
@@ -354,11 +428,17 @@ with col2:
         if include_cc and selected_creators and not creators_df.empty and selection_mode != "Custom Recipients":
             # Get unique manager emails from selected creators
             selected_df = creators_df[creators_df['name'].isin(selected_creators)]
-            manager_emails = selected_df[selected_df['manager_email'].notna()]['manager_email'].unique().tolist()
             
-            if manager_emails:
-                st.info(f"Managers will be CC'd: {', '.join(manager_emails)}")
-                cc_emails.extend(manager_emails)
+            # Check if manager_email column exists
+            if 'manager_email' in selected_df.columns:
+                manager_emails = selected_df[selected_df['manager_email'].notna()]['manager_email'].unique().tolist()
+                
+                if manager_emails:
+                    st.info(f"Managers will be CC'd: {', '.join(manager_emails)}")
+                    cc_emails.extend(manager_emails)
+            else:
+                if notification_type == "🚨 Critical Alerts":
+                    st.info("Manager CC not available for Critical Alerts. You can add managers manually below.")
     
     # Additional CC emails
     st.markdown("#### Additional CC Recipients")
@@ -393,6 +473,8 @@ with col2:
         st.caption(f"Total CC recipients: {len(cc_emails)}")
 
 st.markdown("---")
+
+# Continuation of Email_Notifications.py - Part 3
 
 # Preview section
 if notification_type == "🛃 Custom Clearance":
@@ -660,6 +742,9 @@ elif (selected_creators or custom_recipients) and st.button("👁️ Preview Ema
             st.error(f"Error generating preview: {str(e)}")
             logger.error(f"Error in preview: {e}", exc_info=True)
 
+
+# Continuation of Email_Notifications.py - Part 4 (Final)
+
 # Send emails section
 if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom_recipients) 
     and schedule_type == "Send Now"):
@@ -889,7 +974,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                     creator_info = creators_df[creators_df['name'] == creator_name].iloc[0]
                     
                     # Check if we should include CC based on selection mode
-                    current_cc_emails = cc_emails if selection_mode != "Custom Recipients" and 'include_cc' in locals() and include_cc else cc_emails
+                    current_cc_emails = cc_emails if selection_mode != "Custom Recipients" and include_cc else cc_emails
                     
                     # Get data based on notification type
                     if notification_type == "📅 PO Schedule":
@@ -900,23 +985,19 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                         }
                         po_df = data_loader.load_po_data(filters)
                         
-                        if po_df is not None and not po_df.empty:
-                            success, message = email_sender.send_po_schedule_email(
-                                creator_info['email'],
-                                creator_name,
-                                po_df,
-                                cc_emails=current_cc_emails,
-                                weeks_ahead=weeks_ahead
-                            )
-                            
+                        # Validate data before sending
+                        if po_df is None:
+                            logger.error(f"load_po_data returned None for {creator_info['email']}")
                             results.append({
                                 'Creator': creator_name,
                                 'Email': creator_info['email'],
-                                'Status': '✅ Success' if success else '❌ Failed',
-                                'POs': po_df['po_number'].nunique(),
-                                'Message': message
+                                'Status': '❌ Error',
+                                'POs': 0,
+                                'Message': 'Failed to load PO data'
                             })
-                        else:
+                            continue
+                            
+                        if po_df.empty:
                             results.append({
                                 'Creator': creator_name,
                                 'Email': creator_info['email'],
@@ -924,6 +1005,23 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                                 'POs': 0,
                                 'Message': 'No POs found'
                             })
+                            continue
+                        
+                        success, message = email_sender.send_po_schedule_email(
+                            creator_info['email'],
+                            creator_name,
+                            po_df,
+                            cc_emails=current_cc_emails,
+                            weeks_ahead=weeks_ahead
+                        )
+                        
+                        results.append({
+                            'Creator': creator_name,
+                            'Email': creator_info['email'],
+                            'Status': '✅ Success' if success else '❌ Failed',
+                            'POs': po_df['po_number'].nunique(),
+                            'Message': message
+                        })
                             
                     elif notification_type == "🚨 Critical Alerts":
                         overdue_pos = data_loader.get_overdue_pos_by_creator(creator_info['email'])
