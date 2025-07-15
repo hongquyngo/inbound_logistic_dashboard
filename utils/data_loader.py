@@ -825,6 +825,7 @@ class InboundDataLoader:
             FROM purchase_order_full_view
             WHERE vendor_location_type = 'International'
                 AND status NOT IN ('COMPLETED')
+                AND pending_standard_arrival_quantity > 0
             """
             
             params = {}
@@ -850,59 +851,59 @@ class InboundDataLoader:
             return pd.DataFrame()
 
     def get_overdue_pos_by_creator(self, creator_email):
-            """Get overdue POs for a specific creator"""
-            try:
-                query = text("""
-                SELECT 
-                    po_number,
-                    vendor_name,
-                    vendor_country_name,
-                    COUNT(DISTINCT po_line_id) as line_items,
-                    SUM(pending_standard_arrival_quantity) as pending_qty,
-                    SUM(outstanding_arrival_amount_usd) as outstanding_value,
-                    MIN(etd) as original_etd,
-                    DATEDIFF(CURDATE(), MIN(etd)) as days_overdue,
-                    GROUP_CONCAT(DISTINCT pt_code SEPARATOR ', ') as products
-                FROM purchase_order_full_view
-                WHERE created_by = :creator_email
-                    AND etd < CURDATE()
-                    AND status NOT IN ('COMPLETED')
-                    AND pending_standard_arrival_quantity > 0
-                GROUP BY po_number, vendor_name, vendor_country_name
-                ORDER BY days_overdue DESC
-                """)
-                
-                with self.engine.connect() as conn:
-                    df = pd.read_sql(query, conn, params={'creator_email': creator_email})
-                
-                return df
-                
-            except Exception as e:
-                logger.error(f"Error getting overdue POs for creator: {e}")
-                return pd.DataFrame()
+        """Get overdue POs for a specific creator"""
+        try:
+            query = text("""
+            SELECT 
+                po_number,
+                vendor_name,
+                vendor_country_name,
+                COUNT(DISTINCT po_line_id) as line_items,
+                SUM(pending_standard_arrival_quantity) as pending_qty,
+                SUM(outstanding_arrival_amount_usd) as outstanding_value,
+                MIN(etd) as original_etd,
+                DATEDIFF(CURDATE(), MIN(etd)) as days_overdue,
+                GROUP_CONCAT(DISTINCT pt_code SEPARATOR ', ') as products
+            FROM purchase_order_full_view
+            WHERE created_by = :creator_email
+                AND etd < CURDATE()
+                AND status NOT IN ('COMPLETED')
+                AND pending_standard_arrival_quantity > 0
+            GROUP BY po_number, vendor_name, vendor_country_name
+            ORDER BY days_overdue DESC
+            """)
+            
+            with self.engine.connect() as conn:
+                df = pd.read_sql(query, conn, params={'creator_email': creator_email})
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting overdue POs for creator: {e}")
+            return pd.DataFrame()
 
     def get_pending_cans_by_creator(self, creator_email):
-            """Get pending CAN items for POs created by specific person"""
-            try:
-                query = text("""
-                SELECT DISTINCT
-                    can.*
-                FROM can_tracking_full_view can
-                INNER JOIN purchase_order_full_view po ON can.po_number = po.po_number
-                WHERE po.created_by = :creator_email
-                    AND can.days_since_arrival > 7
-                    AND can.pending_quantity > 0
-                ORDER BY can.days_since_arrival DESC
-                """)
-                
-                with self.engine.connect() as conn:
-                    df = pd.read_sql(query, conn, params={'creator_email': creator_email})
-                
-                return df
-                
-            except Exception as e:
-                logger.error(f"Error getting pending CANs for creator: {e}")
-                return pd.DataFrame()
+        """Get pending CAN items for POs created by specific person"""
+        try:
+            query = text("""
+            SELECT DISTINCT
+                can.*
+            FROM can_tracking_full_view can
+            INNER JOIN purchase_order_full_view po ON can.po_number = po.po_number
+            WHERE po.created_by = :creator_email
+                AND can.days_since_arrival > 7
+                AND can.pending_quantity > 0
+            ORDER BY can.days_since_arrival DESC
+            """)
+            
+            with self.engine.connect() as conn:
+                df = pd.read_sql(query, conn, params={'creator_email': creator_email})
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting pending CANs for creator: {e}")
+            return pd.DataFrame()
 
     def get_can_vendor_summary(self, pending_only=True):
         """Get vendor summary for CANs"""
@@ -941,183 +942,139 @@ class InboundDataLoader:
         except Exception as e:
             logger.error(f"Error getting CAN vendor summary: {e}")
             return pd.DataFrame()
-        
-    def load_po_data_for_customs(self, filters=None):
-            """Load PO data specifically for customs clearance (international vendors only)"""
-            try:
-                query = """
-                SELECT *
+
+    def load_can_data_for_customs(self, filters=None):
+        """Load CAN data specifically for customs clearance (international vendors only)"""
+        try:
+            # Base query - international CANs with pending items
+            query = """
+            SELECT 
+                arrival_note_number,
+                creator,
+                can_line_id,
+                arrival_date,
+                
+                -- PO info
+                po_number,
+                external_ref_number,
+                po_type,
+                
+                -- Vendor info with details
+                vendor,
+                vendor_code,
+                vendor_type,
+                vendor_location_type,
+                vendor_country_code,
+                vendor_country_name,
+                vendor_contact_name,
+                vendor_contact_email,
+                vendor_contact_phone,
+                
+                -- Product info
+                product_name,
+                brand,
+                package_size,
+                pt_code,
+                hs_code,
+                shelf_life,
+                standard_uom,
+                
+                -- Quantity & Cost
+                buying_quantity,
+                standard_quantity,
+                pending_quantity,
+                pending_value_usd,
+                days_since_arrival,
+                
+                -- Status
+                stocked_in_status,
+                can_status
+                
+            FROM can_tracking_full_view
+            WHERE vendor_location_type = 'International'
+                AND pending_quantity > 0
+            """
+            
+            params = {}
+            
+            if filters:
+                if filters.get('arrival_date_from'):
+                    query += " AND arrival_date >= :arrival_date_from"
+                    params['arrival_date_from'] = filters['arrival_date_from']
+                
+                if filters.get('arrival_date_to'):
+                    query += " AND arrival_date <= :arrival_date_to"
+                    params['arrival_date_to'] = filters['arrival_date_to']
+            
+            query += " ORDER BY arrival_date, vendor_country_name, arrival_note_number"
+            
+            with self.engine.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error loading customs CAN data: {e}")
+            return pd.DataFrame()
+
+    def get_international_shipment_summary(self, weeks_ahead=4):
+        """Get summary of international shipments (POs and CANs) for customs"""
+        try:
+            today = datetime.now().date()
+            end_date = today + timedelta(weeks=weeks_ahead)
+            
+            query = text("""
+            WITH po_summary AS (
+                SELECT 
+                    'Purchase Orders' as shipment_type,
+                    COUNT(DISTINCT po_number) as count,
+                    COUNT(DISTINCT vendor_name) as vendor_count,
+                    COUNT(DISTINCT vendor_country_name) as country_count,
+                    SUM(outstanding_arrival_amount_usd) as total_value_usd
                 FROM purchase_order_full_view
                 WHERE vendor_location_type = 'International'
                     AND status NOT IN ('COMPLETED')
+                    AND etd >= :today
+                    AND etd <= :end_date
                     AND pending_standard_arrival_quantity > 0
-                """
-                
-                params = {}
-                
-                if filters:
-                    if filters.get('etd_from'):
-                        query += " AND etd >= :etd_from"
-                        params['etd_from'] = filters['etd_from']
-                    
-                    if filters.get('etd_to'):
-                        query += " AND etd <= :etd_to"
-                        params['etd_to'] = filters['etd_to']
-                
-                query += " ORDER BY etd, vendor_country_name, po_number"
-                
-                with self.engine.connect() as conn:
-                    df = pd.read_sql(text(query), conn, params=params)
-                
-                return df
-                
-            except Exception as e:
-                logger.error(f"Error loading customs PO data: {e}")
-                return pd.DataFrame()
-
-    def load_can_data_for_customs(self, filters=None):
-            """Load CAN data specifically for customs clearance (international vendors only)"""
-            try:
-                # Base query - international CANs with pending items
-                query = """
+            ),
+            can_summary AS (
                 SELECT 
-                    arrival_note_number,
-                    creator,
-                    can_line_id,
-                    arrival_date,
-                    
-                    -- PO info
-                    po_number,
-                    external_ref_number,
-                    po_type,
-                    
-                    -- Vendor info with details
-                    vendor,
-                    vendor_code,
-                    vendor_type,
-                    vendor_location_type,
-                    vendor_country_code,
-                    vendor_country_name,
-                    vendor_contact_name,
-                    vendor_contact_email,
-                    vendor_contact_phone,
-                    
-                    -- Product info
-                    product_name,
-                    brand,
-                    package_size,
-                    pt_code,
-                    hs_code,
-                    shelf_life,
-                    standard_uom,
-                    
-                    -- Quantity & Cost
-                    buying_quantity,
-                    standard_quantity,
-                    pending_quantity,
-                    pending_value_usd,
-                    days_since_arrival,
-                    
-                    -- Status
-                    stocked_in_status,
-                    can_status
-                    
+                    'Container Arrivals' as shipment_type,
+                    COUNT(DISTINCT arrival_note_number) as count,
+                    COUNT(DISTINCT vendor) as vendor_count,
+                    COUNT(DISTINCT vendor_country_name) as country_count,
+                    SUM(pending_value_usd) as total_value_usd
                 FROM can_tracking_full_view
                 WHERE vendor_location_type = 'International'
                     AND pending_quantity > 0
-                """
+                    AND arrival_date >= :today
+                    AND arrival_date <= :end_date
+            ),
+            combined_summary AS (
+                SELECT * FROM po_summary
+                UNION ALL
+                SELECT * FROM can_summary
+            )
+            SELECT 
+                MAX(CASE WHEN shipment_type = 'Purchase Orders' THEN count ELSE 0 END) as po_count,
+                MAX(CASE WHEN shipment_type = 'Container Arrivals' THEN count ELSE 0 END) as can_count,
+                COUNT(DISTINCT shipment_type) as shipment_types,
+                SUM(vendor_count) as total_vendors,
+                MAX(country_count) as total_countries,
+                SUM(total_value_usd) as total_value
+            FROM combined_summary
+            """)
+            
+            with self.engine.connect() as conn:
+                result = pd.read_sql(query, conn, params={
+                    'today': today,
+                    'end_date': end_date
+                })
                 
-                params = {}
-                
-                if filters:
-                    if filters.get('arrival_date_from'):
-                        query += " AND arrival_date >= :arrival_date_from"
-                        params['arrival_date_from'] = filters['arrival_date_from']
-                    
-                    if filters.get('arrival_date_to'):
-                        query += " AND arrival_date <= :arrival_date_to"
-                        params['arrival_date_to'] = filters['arrival_date_to']
-                
-                query += " ORDER BY arrival_date, vendor_country_name, arrival_note_number"
-                
-                with self.engine.connect() as conn:
-                    df = pd.read_sql(text(query), conn, params=params)
-                
-                return df
-                
-            except Exception as e:
-                logger.error(f"Error loading customs CAN data: {e}")
-                return pd.DataFrame()
-
-    def get_international_shipment_summary(self, weeks_ahead=4):
-            """Get summary of international shipments (POs and CANs) for customs"""
-            try:
-                today = datetime.now().date()
-                end_date = today + timedelta(weeks=weeks_ahead)
-                
-                query = text("""
-                WITH po_summary AS (
-                    SELECT 
-                        'Purchase Orders' as shipment_type,
-                        COUNT(DISTINCT po_number) as count,
-                        COUNT(DISTINCT vendor_name) as vendor_count,
-                        COUNT(DISTINCT vendor_country_name) as country_count,
-                        SUM(outstanding_arrival_amount_usd) as total_value_usd
-                    FROM purchase_order_full_view
-                    WHERE vendor_location_type = 'International'
-                        AND status NOT IN ('COMPLETED')
-                        AND etd >= :today
-                        AND etd <= :end_date
-                        AND pending_standard_arrival_quantity > 0
-                ),
-                can_summary AS (
-                    SELECT 
-                        'Container Arrivals' as shipment_type,
-                        COUNT(DISTINCT arrival_note_number) as count,
-                        COUNT(DISTINCT vendor) as vendor_count,
-                        COUNT(DISTINCT vendor_country_name) as country_count,
-                        SUM(pending_value_usd) as total_value_usd
-                    FROM can_tracking_full_view
-                    WHERE vendor_location_type = 'International'
-                        AND pending_quantity > 0
-                        AND arrival_date >= :today
-                        AND arrival_date <= :end_date
-                ),
-                combined_summary AS (
-                    SELECT * FROM po_summary
-                    UNION ALL
-                    SELECT * FROM can_summary
-                )
-                SELECT 
-                    MAX(CASE WHEN shipment_type = 'Purchase Orders' THEN count ELSE 0 END) as po_count,
-                    MAX(CASE WHEN shipment_type = 'Container Arrivals' THEN count ELSE 0 END) as can_count,
-                    COUNT(DISTINCT shipment_type) as shipment_types,
-                    SUM(vendor_count) as total_vendors,
-                    MAX(country_count) as total_countries,
-                    SUM(total_value_usd) as total_value
-                FROM combined_summary
-                """)
-                
-                with self.engine.connect() as conn:
-                    result = pd.read_sql(query, conn, params={
-                        'today': today,
-                        'end_date': end_date
-                    })
-                    
-                if not result.empty:
-                    return result.iloc[0].to_dict()
-                else:
-                    return {
-                        'po_count': 0,
-                        'can_count': 0,
-                        'shipment_types': 0,
-                        'total_vendors': 0,
-                        'total_countries': 0,
-                        'total_value': 0
-                    }
-                    
-            except Exception as e:
-                logger.error(f"Error getting international shipment summary: {e}")
+            if not result.empty:
+                return result.iloc[0].to_dict()
+            else:
                 return {
                     'po_count': 0,
                     'can_count': 0,
@@ -1127,6 +1084,17 @@ class InboundDataLoader:
                     'total_value': 0
                 }
                 
+        except Exception as e:
+            logger.error(f"Error getting international shipment summary: {e}")
+            return {
+                'po_count': 0,
+                'can_count': 0,
+                'shipment_types': 0,
+                'total_vendors': 0,
+                'total_countries': 0,
+                'total_value': 0
+            }
+    
     def pivot_po_data(self, df, period='weekly', date_type='etd'):
         """Pivot PO data by period"""
         try:
@@ -1180,5 +1148,138 @@ class InboundDataLoader:
         except Exception as e:
             logger.error(f"Error pivoting PO data: {e}")
             return pd.DataFrame()
-        
-        
+
+
+    def get_vendors_with_active_pos(self):
+        """Get list of vendors with active POs and their contact information"""
+        try:
+            # Không dùng decorator @st.cache_data ở đây
+            query = text("""
+            SELECT 
+                vendor_name,
+                vendor_code,
+                vendor_type,
+                vendor_location_type,
+                vendor_country_name,
+                vendor_contact_email as vendor_email,
+                vendor_contact_name as contact_name,
+                vendor_contact_phone as contact_phone,
+                COUNT(DISTINCT po_number) as active_pos,
+                SUM(outstanding_arrival_amount_usd) as outstanding_value,
+                MIN(etd) as next_etd,
+                GROUP_CONCAT(DISTINCT created_by SEPARATOR ', ') as po_creators
+            FROM purchase_order_full_view
+            WHERE status NOT IN ('COMPLETED', 'CANCELLED')
+                AND pending_standard_arrival_quantity > 0
+                AND vendor_contact_email IS NOT NULL 
+                AND vendor_contact_email != ''
+            GROUP BY vendor_name, vendor_code, vendor_type, 
+                    vendor_location_type, vendor_country_name,
+                    vendor_contact_email, vendor_contact_name, 
+                    vendor_contact_phone
+            ORDER BY outstanding_value DESC
+            """)
+            
+            with self.engine.connect() as conn:
+                df = pd.read_sql(query, conn)
+            
+            # Validate email addresses
+            df = df[df['vendor_email'].apply(lambda x: '@' in str(x) if x else False)]
+            
+            # Loại bỏ duplicate contacts dựa trên vendor_name và email
+            df = df.drop_duplicates(subset=['vendor_name', 'vendor_email'])
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting vendor list: {e}")
+            return pd.DataFrame()
+
+    def get_vendor_contacts(self, vendor_names):
+        """Get all contacts for specified vendor names"""
+        try:
+            if not vendor_names:
+                return pd.DataFrame()
+            
+            query = text("""
+            SELECT 
+                CONCAT(vendor_name, '_', vendor_contact_email) as contact_id,
+                vendor_name,
+                vendor_code,
+                vendor_type,
+                vendor_location_type,
+                vendor_country_name,
+                vendor_contact_email as vendor_email,
+                vendor_contact_name as contact_name,
+                vendor_contact_phone as contact_phone,
+                COUNT(DISTINCT po_number) as active_pos,
+                SUM(outstanding_arrival_amount_usd) as outstanding_value
+            FROM purchase_order_full_view
+            WHERE vendor_name IN :vendor_names
+                AND vendor_contact_email IS NOT NULL
+                AND vendor_contact_email != ''
+                AND status NOT IN ('COMPLETED', 'CANCELLED')
+                AND pending_standard_arrival_quantity > 0
+            GROUP BY vendor_name, vendor_code, vendor_type, 
+                    vendor_location_type, vendor_country_name,
+                    vendor_contact_email, vendor_contact_name, 
+                    vendor_contact_phone
+            ORDER BY vendor_name, vendor_contact_name
+            """)
+            
+            with self.engine.connect() as conn:
+                df = pd.read_sql(query, conn, params={'vendor_names': tuple(vendor_names)})
+            
+            # Validate email addresses
+            df = df[df['vendor_email'].apply(lambda x: '@' in str(x) if x else False)]
+            
+            # Remove duplicates - chỉ giữ 1 contact cho mỗi combination của vendor + email
+            df = df.drop_duplicates(subset=['vendor_name', 'vendor_email'])
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting vendor contacts: {e}")
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=300)  
+    def get_vendor_pos(_self, vendor_name: str, weeks_ahead: int = 4, include_overdue: bool = True):
+        """Get POs for a specific vendor including overdue and upcoming"""
+        try:
+            query = """
+            SELECT *
+            FROM purchase_order_full_view
+            WHERE vendor_name = :vendor_name
+                AND status NOT IN ('COMPLETED', 'CANCELLED')
+                AND pending_standard_arrival_quantity > 0
+            """
+            
+            params = {'vendor_name': vendor_name}
+            
+            if include_overdue:
+                # Include all POs: overdue + upcoming
+                query += """
+                    AND (
+                        etd < CURDATE()  -- Overdue
+                        OR (etd >= CURDATE() AND etd <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK))  -- Upcoming
+                    )
+                """
+                params['weeks'] = weeks_ahead
+            else:
+                # Only upcoming POs
+                query += """
+                    AND etd >= CURDATE()
+                    AND etd <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK)
+                """
+                params['weeks'] = weeks_ahead
+            
+            query += " ORDER BY etd, po_number"
+            
+            with _self.engine.connect() as conn:
+                df = pd.read_sql(text(query), conn, params=params)
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error getting vendor POs: {e}")
+            return pd.DataFrame()

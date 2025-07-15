@@ -356,6 +356,107 @@ class InboundEmailSender:
             logger.error(f"Error sending customs email: {e}", exc_info=True)
             return False, str(e)
     
+
+    def send_vendor_po_schedule(self, vendor_email: str, vendor_name: str,
+                            po_df: pd.DataFrame, cc_emails: List[str] = None,
+                            weeks_ahead: int = 4, include_overdue: bool = True,
+                            contact_name: str = None) -> Tuple[bool, str]:
+        """Send PO schedule to vendor including overdue and upcoming POs"""
+        try:
+            if not self._validate_config():
+                return False, "Email configuration missing"
+            
+            if po_df is None or po_df.empty:
+                return False, "No PO data available"
+            
+            # Separate overdue and upcoming POs
+            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            today = datetime.now().date()
+            
+            overdue_pos = po_df[po_df['etd'].dt.date < today] if include_overdue else pd.DataFrame()
+            upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+            
+            # Count statistics
+            overdue_count = overdue_pos['po_number'].nunique() if not overdue_pos.empty else 0
+            upcoming_count = upcoming_pos['po_number'].nunique() if not upcoming_pos.empty else 0
+            
+            # Create message
+            msg = MIMEMultipart('alternative')
+            
+            # Dynamic subject based on content
+            if overdue_count > 0 and upcoming_count > 0:
+                msg['Subject'] = f"🚨 Purchase Order Update - {vendor_name} - {overdue_count} Overdue + {upcoming_count} Upcoming POs"
+            elif overdue_count > 0:
+                msg['Subject'] = f"🚨 URGENT: {overdue_count} Overdue Purchase Orders - {vendor_name}"
+            else:
+                msg['Subject'] = f"Purchase Order Schedule - {vendor_name} - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''}"
+            
+            msg['From'] = self.sender_email
+            msg['To'] = vendor_email
+            
+            if cc_emails:
+                msg['Cc'] = ', '.join(cc_emails)
+            
+            # Create vendor-specific HTML content
+            html_content = self._create_vendor_po_schedule_html(
+                po_df, 
+                vendor_name, 
+                weeks_ahead,
+                include_overdue=include_overdue,
+                overdue_count=overdue_count,
+                upcoming_count=upcoming_count,
+                contact_name=contact_name
+            )
+            html_part = MIMEText(html_content, 'html')
+            msg.attach(html_part)
+            
+            # CREATE AND ATTACH EXCEL FILE - ĐẢM BẢO PHẦN NÀY HOẠT ĐỘNG
+            try:
+                excel_data = self._create_vendor_po_excel(
+                    po_df,
+                    vendor_name,
+                    include_overdue=include_overdue
+                )
+                if excel_data:
+                    excel_part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                    excel_part.set_payload(excel_data.read())
+                    encoders.encode_base64(excel_part)
+                    
+                    filename = f"po_schedule_{vendor_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+                    excel_part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                    msg.attach(excel_part)
+                    logger.info(f"Excel attachment added: {filename}")
+                else:
+                    logger.warning("Excel data creation returned None")
+            except Exception as e:
+                logger.error(f"Error creating Excel attachment: {e}", exc_info=True)
+            
+            # Add ICS calendar attachment if there are upcoming POs
+            if not upcoming_pos.empty:
+                try:
+                    calendar_gen = InboundCalendarGenerator()
+                    ics_content = calendar_gen.create_po_schedule_ics(upcoming_pos, self.sender_email)
+                    
+                    if ics_content:
+                        ics_part = MIMEBase('text', 'calendar')
+                        ics_part.set_payload(ics_content.encode('utf-8'))
+                        encoders.encode_base64(ics_part)
+                        ics_part.add_header(
+                            'Content-Disposition',
+                            f'attachment; filename="po_schedule_{vendor_name.replace(" ", "_")}_{datetime.now().strftime("%Y%m%d")}.ics"'
+                        )
+                        msg.attach(ics_part)
+                        logger.info("ICS attachment added")
+                except Exception as e:
+                    logger.warning(f"Error creating calendar attachment for vendor: {e}")
+            
+            return self._send_email(msg, vendor_email, cc_emails)
+            
+        except Exception as e:
+            logger.error(f"Error sending vendor PO schedule: {e}", exc_info=True)
+            return False, str(e)
+
+
     # Private helper methods
     def _validate_config(self) -> bool:
         """Validate email configuration"""
@@ -657,41 +758,24 @@ class InboundEmailSender:
                             </a>
                         </div>
                 """
-            date_str = gcal_link['date'].strftime('%b %d')
-            is_urgent = gcal_link.get('is_urgent', False)
-            date_style = 'color: #d32f2f; font-weight: bold;' if is_urgent else 'font-weight: bold;'
             
-            html += f"""
-                    <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
-                        <span style="{date_style} display: inline-block; width: 80px;">{date_str}:</span>
-                        <a href="{gcal_link['link']}" target="_blank" 
-                           style="margin: 0 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
-                           📅 Google Calendar
-                        </a>
-                        <a href="{outlook_cal_links[i]['link']}" target="_blank" 
-                           style="margin: 0 15px; color: #0078d4; text-decoration: none; font-weight: 500;">
-                           📅 Outlook
-                        </a>
+            if len(google_cal_links) > 5:
+                html += f"""
+                        <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: center;">
+                            <p style="font-style: italic; color: #999; margin: 0;">
+                                ... and {len(google_cal_links) - 5} more dates
+                            </p>
+                        </div>
+                """
+            
+            html += """
                     </div>
-            """
-        
-        if len(google_cal_links) > 5:
-            html += f"""
-                    <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: center;">
-                        <p style="font-style: italic; color: #999; margin: 0;">
-                            ... and {len(google_cal_links) - 5} more dates
-                        </p>
-                    </div>
-            """
-        
-        html += """
+                    
+                    <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
+                        Or download the attached .ics file to import all dates into any calendar application
+                    </p>
                 </div>
-                
-                <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
-                    Or download the attached .ics file to import all dates into any calendar application
-                </p>
-            </div>
-        """
+            """
         
         # Add action items
         html += """
@@ -716,6 +800,475 @@ class InboundEmailSender:
         
         return html
     
+    # Excel creation methods
+    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False) -> Optional[io.BytesIO]:
+        """Create Excel attachment for PO schedule with better error handling"""
+        output = io.BytesIO()
+        
+        try:
+            # Validate input
+            if po_df is None or po_df.empty:
+                logger.warning("Empty DataFrame provided to create Excel")
+                return None
+            
+            # Check for required columns
+            required_cols = ['vendor_name', 'po_number', 'pending_standard_arrival_quantity', 
+                           'outstanding_arrival_amount_usd', 'etd']
+            
+            missing_cols = [col for col in required_cols if col not in po_df.columns]
+            if missing_cols:
+                logger.error(f"Missing required columns: {missing_cols}")
+                # Try to continue with available columns
+                po_df = po_df[[col for col in po_df.columns if col in required_cols]]
+            
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Sheet 1: PO Details
+                po_df.to_excel(writer, sheet_name='PO Details', index=False)
+                
+                # Sheet 2: Summary by Vendor (only if columns exist)
+                if all(col in po_df.columns for col in ['vendor_name', 'po_number', 
+                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']):
+                    vendor_summary = po_df.groupby('vendor_name').agg({
+                        'po_number': 'nunique',
+                        'pending_standard_arrival_quantity': 'sum',
+                        'outstanding_arrival_amount_usd': 'sum'
+                    }).reset_index()
+                    vendor_summary.columns = ['Vendor', 'PO Count', 'Pending Quantity', 'Outstanding Value USD']
+                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
+                
+                # Sheet 3: Weekly Timeline (only if etd exists)
+                if 'etd' in po_df.columns:
+                    po_df_copy = po_df.copy()
+                    po_df_copy['etd'] = pd.to_datetime(po_df_copy['etd'], errors='coerce')
+                    po_df_copy = po_df_copy.dropna(subset=['etd'])  # Remove invalid dates
+                    
+                    if not po_df_copy.empty:
+                        po_df_copy['week'] = po_df_copy['etd'].dt.to_period('W').dt.start_time
+                        
+                        # Check which columns are available for aggregation
+                        agg_dict = {}
+                        if 'po_number' in po_df_copy.columns:
+                            agg_dict['po_number'] = 'nunique'
+                        if 'pending_standard_arrival_quantity' in po_df_copy.columns:
+                            agg_dict['pending_standard_arrival_quantity'] = 'sum'
+                        if 'outstanding_arrival_amount_usd' in po_df_copy.columns:
+                            agg_dict['outstanding_arrival_amount_usd'] = 'sum'
+                        
+                        if agg_dict:
+                            weekly_summary = po_df_copy.groupby('week').agg(agg_dict).reset_index()
+                            
+                            # Rename columns based on what's available
+                            rename_dict = {'week': 'Week Starting'}
+                            if 'po_number' in agg_dict:
+                                rename_dict['po_number'] = 'PO Count'
+                            if 'pending_standard_arrival_quantity' in agg_dict:
+                                rename_dict['pending_standard_arrival_quantity'] = 'Total Quantity'
+                            if 'outstanding_arrival_amount_usd' in agg_dict:
+                                rename_dict['outstanding_arrival_amount_usd'] = 'Total Value USD'
+                            
+                            weekly_summary.rename(columns=rename_dict, inplace=True)
+                            weekly_summary.to_excel(writer, sheet_name='Weekly Timeline', index=False)
+                
+                # Add formatting
+                workbook = writer.book
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#2e7d32',
+                    'font_color': 'white',
+                    'border': 1
+                })
+                
+                # Apply header formatting to all sheets
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column(0, 20, 15)  # Default column width
+                    worksheet.freeze_panes(1, 0)  # Freeze header row
+            
+            output.seek(0)
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error creating PO schedule Excel: {e}", exc_info=True)
+            return None
+    
+    def _create_critical_alerts_excel(self, data_dict: Dict) -> Optional[io.BytesIO]:
+        """Create Excel attachment for critical alerts"""
+        output = io.BytesIO()
+        
+        try:
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Sheet 1: Overdue POs
+                if 'overdue_pos' in data_dict and not data_dict['overdue_pos'].empty:
+                    data_dict['overdue_pos'].to_excel(writer, sheet_name='Overdue POs', index=False)
+                
+                # Sheet 2: Pending Stock-in
+                if 'pending_stockin' in data_dict and not data_dict['pending_stockin'].empty:
+                    data_dict['pending_stockin'].to_excel(writer, sheet_name='Pending Stock-in', index=False)
+                
+                # Add formatting
+                workbook = writer.book
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#d32f2f',
+                    'font_color': 'white',
+                    'border': 1
+                })
+                
+                # Apply formatting
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column(0, 20, 15)
+                    worksheet.freeze_panes(1, 0)
+            
+            output.seek(0)
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error creating critical alerts Excel: {e}", exc_info=True)
+            return None
+    
+    def _create_pending_stockin_excel(self, can_df: pd.DataFrame) -> Optional[io.BytesIO]:
+        """Create Excel attachment for pending stock-in"""
+        output = io.BytesIO()
+        
+        try:
+            if can_df is None or can_df.empty:
+                logger.warning("Empty DataFrame provided for pending stock-in Excel")
+                return None
+                
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Sheet 1: All pending items
+                can_df.to_excel(writer, sheet_name='All Pending Items', index=False)
+                
+                # Sheet 2: Summary by age
+                can_df['days_category'] = pd.cut(can_df['days_since_arrival'], 
+                                                bins=[0, 3, 7, 14, float('inf')],
+                                                labels=['0-3 days', '4-7 days', '8-14 days', '> 14 days'])
+                
+                age_summary = can_df.groupby('days_category').agg({
+                    'arrival_note_number': 'count',
+                    'pending_quantity': 'sum',
+                    'pending_value_usd': 'sum'
+                }).reset_index()
+                age_summary.columns = ['Days Category', 'Item Count', 'Total Quantity', 'Total Value USD']
+                age_summary.to_excel(writer, sheet_name='Age Summary', index=False)
+                
+                # Sheet 3: Vendor Summary
+                if 'vendor' in can_df.columns:
+                    vendor_summary = can_df.groupby('vendor').agg({
+                        'arrival_note_number': 'nunique',
+                        'can_line_id': 'count',
+                        'pending_quantity': 'sum',
+                        'pending_value_usd': 'sum',
+                        'days_since_arrival': 'mean'
+                    }).reset_index()
+                    vendor_summary.columns = ['Vendor', 'CAN Count', 'Line Items', 'Total Quantity', 
+                                            'Total Value USD', 'Avg Days Pending']
+                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
+                
+                # Add formatting
+                workbook = writer.book
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#f57c00',
+                    'font_color': 'white',
+                    'border': 1
+                })
+                
+                # Apply formatting
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column(0, 20, 15)
+                    worksheet.freeze_panes(1, 0)
+            
+            output.seek(0)
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error creating pending stock-in Excel: {e}", exc_info=True)
+            return None
+    
+    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None) -> Optional[io.BytesIO]:
+        """Create Excel for customs clearance"""
+        output = io.BytesIO()
+        
+        try:
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Sheet 1: Summary by Country
+                if not po_df.empty:
+                    country_summary = po_df.groupby('vendor_country_name').agg({
+                        'po_number': 'nunique',
+                        'vendor_name': 'nunique',
+                        'pending_standard_arrival_quantity': 'sum',
+                        'outstanding_arrival_amount_usd': 'sum'
+                    }).reset_index()
+                    country_summary.columns = ['Country', 'PO Count', 'Vendors', 'Total Quantity', 'Total Value USD']
+                    country_summary.to_excel(writer, sheet_name='Country Summary', index=False)
+                
+                # Sheet 2: PO Details
+                if not po_df.empty:
+                    po_df.to_excel(writer, sheet_name='PO Details', index=False)
+                
+                # Sheet 3: CAN Arrivals
+                if can_df is not None and not can_df.empty:
+                    can_df.to_excel(writer, sheet_name='CAN Arrivals', index=False)
+                    
+                    # Sheet 4: CAN Summary by Date
+                    can_summary = can_df.groupby(['arrival_date', 'vendor_country_name']).agg({
+                        'arrival_note_number': 'nunique',
+                        'vendor': 'nunique',
+                        'pending_quantity': 'sum',
+                        'pending_value_usd': 'sum'
+                    }).reset_index()
+                    can_summary.columns = ['Arrival Date', 'Country', 'CAN Count', 'Vendors', 'Total Quantity', 'Total Value USD']
+                    can_summary.to_excel(writer, sheet_name='CAN Summary', index=False)
+                
+                # Sheet 5: Combined Timeline
+                timeline_data = []
+                
+                # Add PO data to timeline
+                if not po_df.empty:
+                    po_timeline = po_df.groupby(['etd', 'vendor_country_name']).agg({
+                        'po_number': 'nunique',
+                        'outstanding_arrival_amount_usd': 'sum'
+                    }).reset_index()
+                    po_timeline['Type'] = 'PO ETD'
+                    po_timeline.columns = ['Date', 'Country', 'Count', 'Value USD', 'Type']
+                    timeline_data.append(po_timeline)
+                
+                # Add CAN data to timeline
+                if can_df is not None and not can_df.empty:
+                    can_timeline = can_df.groupby(['arrival_date', 'vendor_country_name']).agg({
+                        'arrival_note_number': 'nunique',
+                        'pending_value_usd': 'sum'
+                    }).reset_index()
+                    can_timeline['Type'] = 'CAN Arrival'
+                    can_timeline.columns = ['Date', 'Country', 'Count', 'Value USD', 'Type']
+                    timeline_data.append(can_timeline)
+                
+                if timeline_data:
+                    combined_timeline = pd.concat(timeline_data, ignore_index=True)
+                    combined_timeline = combined_timeline.sort_values(['Date', 'Type', 'Country'])
+                    combined_timeline.to_excel(writer, sheet_name='Combined Timeline', index=False)
+                
+                # Add formatting
+                workbook = writer.book
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#00796b',
+                    'font_color': 'white',
+                    'border': 1
+                })
+                
+                # Apply formatting
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column(0, 20, 15)
+                    worksheet.freeze_panes(1, 0)
+            
+            output.seek(0)
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error creating customs Excel: {e}", exc_info=True)
+            return None
+    
+
+    def _create_vendor_po_excel(self, po_df: pd.DataFrame, vendor_name: str, 
+                            include_overdue: bool = True) -> Optional[io.BytesIO]:
+        """Create Excel attachment for vendor with separate sheets for overdue and upcoming"""
+        output = io.BytesIO()
+        
+        try:
+            if po_df is None or po_df.empty:
+                return None
+            
+            # Make a copy to avoid modifying original
+            po_df = po_df.copy()
+            
+            # Separate overdue and upcoming
+            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            today = datetime.now().date()
+            
+            overdue_pos = po_df[po_df['etd'].dt.date < today].copy() if include_overdue else pd.DataFrame()
+            upcoming_pos = po_df[po_df['etd'].dt.date >= today].copy()
+            
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                # Sheet 1: Summary
+                summary_data = {
+                    'Metric': ['Total POs', 'Overdue POs', 'Upcoming POs', 'Total Value USD', 
+                            'Overdue Value USD', 'Upcoming Value USD'],
+                    'Value': [
+                        po_df['po_number'].nunique(),
+                        overdue_pos['po_number'].nunique() if not overdue_pos.empty else 0,
+                        upcoming_pos['po_number'].nunique() if not upcoming_pos.empty else 0,
+                        po_df['outstanding_arrival_amount_usd'].sum(),
+                        overdue_pos['outstanding_arrival_amount_usd'].sum() if not overdue_pos.empty else 0,
+                        upcoming_pos['outstanding_arrival_amount_usd'].sum() if not upcoming_pos.empty else 0
+                    ]
+                }
+                summary_df = pd.DataFrame(summary_data)
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Sheet 2: Overdue POs (if any)
+                if include_overdue and not overdue_pos.empty:
+                    # FIX: Tính days_overdue đúng cách
+                    overdue_pos['days_overdue'] = overdue_pos['etd'].apply(
+                        lambda x: (today - x.date()).days
+                    )
+                    overdue_pos = overdue_pos.sort_values('days_overdue', ascending=False)
+                    
+                    # Select relevant columns - kiểm tra columns tồn tại
+                    overdue_columns = []
+                    column_mapping = {}
+                    
+                    if 'etd' in overdue_pos.columns:
+                        overdue_columns.append('etd')
+                        column_mapping['etd'] = 'ETD'
+                    
+                    if 'days_overdue' in overdue_pos.columns:
+                        overdue_columns.append('days_overdue')
+                        column_mapping['days_overdue'] = 'Days Overdue'
+                    
+                    if 'po_number' in overdue_pos.columns:
+                        overdue_columns.append('po_number')
+                        column_mapping['po_number'] = 'PO Number'
+                    
+                    if 'pt_code' in overdue_pos.columns:
+                        overdue_columns.append('pt_code')
+                        column_mapping['pt_code'] = 'PT Code'
+                    
+                    if 'product_name' in overdue_pos.columns:
+                        overdue_columns.append('product_name')
+                        column_mapping['product_name'] = 'Product'
+                    
+                    if 'pending_standard_arrival_quantity' in overdue_pos.columns:
+                        overdue_columns.append('pending_standard_arrival_quantity')
+                        column_mapping['pending_standard_arrival_quantity'] = 'Outstanding Qty'
+                    
+                    if 'outstanding_arrival_amount_usd' in overdue_pos.columns:
+                        overdue_columns.append('outstanding_arrival_amount_usd')
+                        column_mapping['outstanding_arrival_amount_usd'] = 'Value USD'
+                    
+                    if 'payment_term' in overdue_pos.columns:
+                        overdue_columns.append('payment_term')
+                        column_mapping['payment_term'] = 'Payment Terms'
+                    
+                    if 'status' in overdue_pos.columns:
+                        overdue_columns.append('status')
+                        column_mapping['status'] = 'Status'
+                    
+                    overdue_export = overdue_pos[overdue_columns].copy()
+                    overdue_export.rename(columns=column_mapping, inplace=True)
+                    overdue_export.to_excel(writer, sheet_name='Overdue POs', index=False)
+                
+                # Sheet 3: Upcoming POs
+                if not upcoming_pos.empty:
+                    # FIX: Tính days_until_etd đúng cách
+                    upcoming_pos['days_until_etd'] = upcoming_pos['etd'].apply(
+                        lambda x: (x.date() - today).days
+                    )
+                    upcoming_pos = upcoming_pos.sort_values('etd')
+                    
+                    # Select relevant columns - kiểm tra columns tồn tại
+                    upcoming_columns = []
+                    column_mapping = {}
+                    
+                    if 'etd' in upcoming_pos.columns:
+                        upcoming_columns.append('etd')
+                        column_mapping['etd'] = 'ETD'
+                    
+                    if 'days_until_etd' in upcoming_pos.columns:
+                        upcoming_columns.append('days_until_etd')
+                        column_mapping['days_until_etd'] = 'Days Until ETD'
+                    
+                    if 'po_number' in upcoming_pos.columns:
+                        upcoming_columns.append('po_number')
+                        column_mapping['po_number'] = 'PO Number'
+                    
+                    if 'pt_code' in upcoming_pos.columns:
+                        upcoming_columns.append('pt_code')
+                        column_mapping['pt_code'] = 'PT Code'
+                    
+                    if 'product_name' in upcoming_pos.columns:
+                        upcoming_columns.append('product_name')
+                        column_mapping['product_name'] = 'Product'
+                    
+                    if 'pending_standard_arrival_quantity' in upcoming_pos.columns:
+                        upcoming_columns.append('pending_standard_arrival_quantity')
+                        column_mapping['pending_standard_arrival_quantity'] = 'Outstanding Qty'
+                    
+                    if 'outstanding_arrival_amount_usd' in upcoming_pos.columns:
+                        upcoming_columns.append('outstanding_arrival_amount_usd')
+                        column_mapping['outstanding_arrival_amount_usd'] = 'Value USD'
+                    
+                    if 'trade_term' in upcoming_pos.columns:
+                        upcoming_columns.append('trade_term')
+                        column_mapping['trade_term'] = 'Trade Terms'
+                    
+                    if 'status' in upcoming_pos.columns:
+                        upcoming_columns.append('status')
+                        column_mapping['status'] = 'Status'
+                    
+                    upcoming_export = upcoming_pos[upcoming_columns].copy()
+                    upcoming_export.rename(columns=column_mapping, inplace=True)
+                    upcoming_export.to_excel(writer, sheet_name='Upcoming POs', index=False)
+                
+                # Sheet 4: All PO Details
+                all_columns = []
+                column_mapping = {}
+                
+                # Check which columns exist
+                available_columns = {
+                    'po_number': 'PO Number',
+                    'po_date': 'PO Date',
+                    'etd': 'ETD',
+                    'eta': 'ETA',
+                    'vendor_name': 'Vendor',
+                    'product_name': 'Product',
+                    'pt_code': 'PT Code',
+                    'brand': 'Brand',
+                    'pending_standard_arrival_quantity': 'Outstanding Qty',
+                    'outstanding_arrival_amount_usd': 'Value USD',
+                    'payment_term': 'Payment Terms',
+                    'trade_term': 'Trade Terms',
+                    'status': 'Status'
+                }
+                
+                for col, display_name in available_columns.items():
+                    if col in po_df.columns:
+                        all_columns.append(col)
+                        column_mapping[col] = display_name
+                
+                all_export = po_df[all_columns].copy()
+                all_export.rename(columns=column_mapping, inplace=True)
+                all_export.to_excel(writer, sheet_name='All PO Details', index=False)
+                
+                # Add formatting
+                workbook = writer.book
+                
+                # Format for headers
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'bg_color': '#2e7d32',
+                    'font_color': 'white',
+                    'border': 1
+                })
+                
+                # Apply formatting
+                for sheet_name in writer.sheets:
+                    worksheet = writer.sheets[sheet_name]
+                    worksheet.set_column(0, 20, 15)
+                    worksheet.freeze_panes(1, 0)
+            
+            output.seek(0)
+            return output
+            
+        except Exception as e:
+            logger.error(f"Error creating vendor PO Excel: {e}", exc_info=True)
+            return None
+
+
     def _create_critical_alerts_html(self, data_dict: Dict, recipient_name: str,
                                     is_custom_recipient: bool = False) -> str:
         """Create HTML content for critical alerts email"""
@@ -1519,37 +2072,6 @@ class InboundEmailSender:
                             </div>
                         </div>
                 """
-                o_link = outlook_links[i] if i < len(outlook_links) else None
-                date_str = g_link['date'].strftime('%b %d')
-                event_type = g_link['type']
-                country = g_link['country']
-                
-                type_emoji = "📅" if event_type == "PO" else "📦"
-                type_text = "PO ETD" if event_type == "PO" else "CAN Arrival"
-                
-                html += f"""
-                        <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
-                            <span style="font-weight: bold; display: inline-block; width: 80px;">{date_str}:</span>
-                            <span style="color: #666; font-size: 14px;">{type_emoji} {type_text} - {country}</span>
-                            <div style="margin-top: 5px; margin-left: 80px;">
-                                <a href="{g_link['link']}" target="_blank" 
-                                   style="margin-right: 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
-                                   📅 Google Calendar
-                                </a>
-                """
-                
-                if o_link:
-                    html += f"""
-                                <a href="{o_link['link']}" target="_blank" 
-                                   style="color: #0078d4; text-decoration: none; font-weight: 500;">
-                                   📅 Outlook
-                                </a>
-                    """
-                
-                html += """
-                            </div>
-                        </div>
-                """
             
             if len(google_links) > 5:
                 html += f"""
@@ -1628,275 +2150,332 @@ class InboundEmailSender:
         
         return html
     
-    # Excel creation methods
-    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False) -> Optional[io.BytesIO]:
-        """Create Excel attachment for PO schedule with better error handling"""
-        output = io.BytesIO()
+
+    def _create_vendor_po_schedule_html(self, po_df: pd.DataFrame, vendor_name: str, 
+                                weeks_ahead: int = 4, include_overdue: bool = True,
+                                overdue_count: int = 0, upcoming_count: int = 0,
+                                contact_name: str = None) -> str:
+        """Create HTML content specifically for vendors with overdue and upcoming sections"""
+        # Process data
+        po_df['etd'] = pd.to_datetime(po_df['etd'])
+        today = datetime.now().date()
         
-        try:
-            # Validate input
-            if po_df is None or po_df.empty:
-                logger.warning("Empty DataFrame provided to create Excel")
-                return None
+        # Separate overdue and upcoming
+        overdue_pos = po_df[po_df['etd'].dt.date < today] if include_overdue else pd.DataFrame()
+        upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+        
+        # Calculate totals
+        total_pos = po_df['po_number'].nunique()
+        total_items = len(po_df)
+        total_value = po_df['outstanding_arrival_amount_usd'].sum()
+        
+        # Greeting
+        if contact_name:
+            greeting = f"Dear {contact_name},"
+        else:
+            greeting = f"Dear {vendor_name} Team,"
+        
+        # KHỞI TẠO BIẾN HTML - PHẦN NÀY BỊ THIẾU
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    margin: 0;
+                    padding: 0;
+                }}
+                .header {{
+                    background-color: #2e7d32;
+                    color: white;
+                    padding: 20px;
+                    text-align: center;
+                }}
+                .content {{
+                    padding: 20px;
+                }}
+                .summary-section {{
+                    background-color: #f5f5f5;
+                    border-radius: 5px;
+                    padding: 20px;
+                    margin: 20px 0;
+                }}
+                .overdue-section {{
+                    border: 2px solid #d32f2f;
+                    border-radius: 5px;
+                    padding: 15px;
+                    margin: 20px 0;
+                    background-color: #ffebee;
+                }}
+                .upcoming-section {{
+                    border: 1px solid #2e7d32;
+                    border-radius: 5px;
+                    padding: 15px;
+                    margin: 20px 0;
+                }}
+                .section-header {{
+                    font-weight: bold;
+                    font-size: 18px;
+                    margin-bottom: 10px;
+                }}
+                .overdue-header {{
+                    color: #d32f2f;
+                }}
+                .upcoming-header {{
+                    color: #2e7d32;
+                }}
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 10px;
+                }}
+                th, td {{
+                    padding: 8px;
+                    text-align: left;
+                    border-bottom: 1px solid #ddd;
+                }}
+                th {{
+                    background-color: #f8f9fa;
+                    font-weight: bold;
+                }}
+                .overdue {{
+                    color: #d32f2f;
+                    font-weight: bold;
+                }}
+                .footer {{
+                    margin-top: 30px;
+                    padding: 20px;
+                    background-color: #f8f9fa;
+                    text-align: center;
+                    font-size: 12px;
+                    color: #666;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>📦 Purchase Order Schedule</h1>
+                <p>Delivery Schedule for {vendor_name}</p>
+            </div>
             
-            # Check for required columns
-            required_cols = ['vendor_name', 'po_number', 'pending_standard_arrival_quantity', 
-                           'outstanding_arrival_amount_usd', 'etd']
-            
-            missing_cols = [col for col in required_cols if col not in po_df.columns]
-            if missing_cols:
-                logger.error(f"Missing required columns: {missing_cols}")
-                # Try to continue with available columns
-                po_df = po_df[[col for col in po_df.columns if col in required_cols]]
-            
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Sheet 1: PO Details
-                po_df.to_excel(writer, sheet_name='PO Details', index=False)
+            <div class="content">
+                <p>{greeting}</p>
+                <p>Please find below the status of your purchase orders with our company.</p>
                 
-                # Sheet 2: Summary by Vendor (only if columns exist)
-                if all(col in po_df.columns for col in ['vendor_name', 'po_number', 
-                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']):
-                    vendor_summary = po_df.groupby('vendor_name').agg({
-                        'po_number': 'nunique',
-                        'pending_standard_arrival_quantity': 'sum',
-                        'outstanding_arrival_amount_usd': 'sum'
-                    }).reset_index()
-                    vendor_summary.columns = ['Vendor', 'PO Count', 'Pending Quantity', 'Outstanding Value USD']
-                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
+                <div class="summary-section">
+                    <h3>📊 Summary</h3>
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                        <tr>
+                            <td width="25%" align="center" style="padding: 15px;">
+                                <div style="font-size: 24px; font-weight: bold;">{total_pos}</div>
+                                <div style="font-size: 14px; color: #666;">Total POs</div>
+                            </td>
+                            <td width="25%" align="center" style="padding: 15px;">
+                                <div style="font-size: 24px; font-weight: bold; color: #d32f2f;">{overdue_count}</div>
+                                <div style="font-size: 14px; color: #666;">Overdue POs</div>
+                            </td>
+                            <td width="25%" align="center" style="padding: 15px;">
+                                <div style="font-size: 24px; font-weight: bold; color: #2e7d32;">{upcoming_count}</div>
+                                <div style="font-size: 14px; color: #666;">Upcoming POs</div>
+                            </td>
+                            <td width="25%" align="center" style="padding: 15px;">
+                                <div style="font-size: 24px; font-weight: bold;">${total_value:,.0f}</div>
+                                <div style="font-size: 14px; color: #666;">Total Value</div>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+        """
+        
+        # Overdue POs section
+        if include_overdue and not overdue_pos.empty:
+            overdue_value = overdue_pos['outstanding_arrival_amount_usd'].sum()
+            
+            html += f"""
+                <div class="overdue-section">
+                    <div class="section-header overdue-header">
+                        🚨 OVERDUE PURCHASE ORDERS ({overdue_count} POs, ${overdue_value:,.0f})
+                    </div>
+                    <p style="color: #d32f2f; margin: 10px 0;">
+                        The following purchase orders have passed their ETD. Please update us on their status immediately.
+                    </p>
+                    <table>
+                        <tr>
+                            <th>ETD</th>
+                            <th>Days Overdue</th>
+                            <th>PO Number</th>
+                            <th>PT Code</th>
+                            <th>Product</th>
+                            <th>Outstanding Qty</th>
+                            <th>Value (USD)</th>
+                            <th>Payment Terms</th>
+                        </tr>
+            """
+            
+            # Sort by days overdue (most overdue first)
+            overdue_sorted = overdue_pos.copy()
+            overdue_sorted['days_overdue'] = overdue_sorted['etd'].apply(
+                lambda x: (today - x.date()).days
+            )
+            overdue_sorted = overdue_sorted.sort_values('days_overdue', ascending=False)
+            
+            for _, row in overdue_sorted.iterrows():
+                days_overdue = row['days_overdue']
                 
-                # Sheet 3: Weekly Timeline (only if etd exists)
-                if 'etd' in po_df.columns:
-                    po_df_copy = po_df.copy()
-                    po_df_copy['etd'] = pd.to_datetime(po_df_copy['etd'], errors='coerce')
-                    po_df_copy = po_df_copy.dropna(subset=['etd'])  # Remove invalid dates
-                    
-                    if not po_df_copy.empty:
-                        po_df_copy['week'] = po_df_copy['etd'].dt.to_period('W').dt.start_time
+                html += f"""
+                        <tr>
+                            <td class="overdue">{row['etd'].strftime('%b %d, %Y')}</td>
+                            <td class="overdue">{days_overdue} days</td>
+                            <td>{row['po_number']}</td>
+                            <td>{row['pt_code']}</td>
+                            <td>{row['product_name']}</td>
+                            <td>{row['pending_standard_arrival_quantity']:,.0f}</td>
+                            <td>${row['outstanding_arrival_amount_usd']:,.0f}</td>
+                            <td>{row['payment_term']}</td>
+                        </tr>
+                """
+            
+            html += """
+                    </table>
+                    <p style="margin-top: 15px; font-weight: bold; color: #d32f2f;">
+                        ⚠️ Action Required: Please provide updated ETDs and shipment status for all overdue items.
+                    </p>
+                </div>
+            """
+        
+        # Upcoming POs section
+        if not upcoming_pos.empty:
+            upcoming_value = upcoming_pos['outstanding_arrival_amount_usd'].sum()
+            
+            html += f"""
+                <div class="upcoming-section">
+                    <div class="section-header upcoming-header">
+                        📅 UPCOMING DELIVERIES - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} ({upcoming_count} POs, ${upcoming_value:,.0f})
+                    </div>
+                    <table>
+                        <tr>
+                            <th>ETD</th>
+                            <th>Days Until ETD</th>
+                            <th>PO Number</th>
+                            <th>PT Code</th>
+                            <th>Product</th>
+                            <th>Outstanding Qty</th>
+                            <th>Value (USD)</th>
+                            <th>Trade Terms</th>
+                        </tr>
+            """
+            
+            # Sort by ETD (nearest first)
+            upcoming_sorted = upcoming_pos.sort_values('etd')
+            
+            for _, row in upcoming_sorted.iterrows():
+                days_until = (row['etd'].date() - today).days
+                
+                html += f"""
+                        <tr>
+                            <td>{row['etd'].strftime('%b %d, %Y')}</td>
+                            <td>{days_until} days</td>
+                            <td>{row['po_number']}</td>
+                            <td>{row['pt_code']}</td>
+                            <td>{row['product_name']}</td>
+                            <td>{row['pending_standard_arrival_quantity']:,.0f}</td>
+                            <td>${row['outstanding_arrival_amount_usd']:,.0f}</td>
+                            <td>{row['trade_term']}</td>
+                        </tr>
+                """
+            
+            html += """
+                    </table>
+                </div>
+            """
+        # THÊM GOOGLE CALENDAR LINKS Ở ĐÂY - SAU UPCOMING SECTION
+        # Add calendar buttons
+        if not upcoming_pos.empty:
+            try:
+                calendar_gen = InboundCalendarGenerator()
+                google_cal_links = calendar_gen.create_google_calendar_links(upcoming_pos)
+                outlook_cal_links = calendar_gen.create_outlook_calendar_links(upcoming_pos)
+            except Exception as e:
+                logger.warning(f"Error creating calendar links: {e}")
+                google_cal_links = None
+                outlook_cal_links = None
+            
+            # Show calendar links only if available
+            if google_cal_links and outlook_cal_links:
+                html += """
+                    <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
+                        <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
+                        <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
                         
-                        # Check which columns are available for aggregation
-                        agg_dict = {}
-                        if 'po_number' in po_df_copy.columns:
-                            agg_dict['po_number'] = 'nunique'
-                        if 'pending_standard_arrival_quantity' in po_df_copy.columns:
-                            agg_dict['pending_standard_arrival_quantity'] = 'sum'
-                        if 'outstanding_arrival_amount_usd' in po_df_copy.columns:
-                            agg_dict['outstanding_arrival_amount_usd'] = 'sum'
-                        
-                        if agg_dict:
-                            weekly_summary = po_df_copy.groupby('week').agg(agg_dict).reset_index()
-                            
-                            # Rename columns based on what's available
-                            rename_dict = {'week': 'Week Starting'}
-                            if 'po_number' in agg_dict:
-                                rename_dict['po_number'] = 'PO Count'
-                            if 'pending_standard_arrival_quantity' in agg_dict:
-                                rename_dict['pending_standard_arrival_quantity'] = 'Total Quantity'
-                            if 'outstanding_arrival_amount_usd' in agg_dict:
-                                rename_dict['outstanding_arrival_amount_usd'] = 'Total Value USD'
-                            
-                            weekly_summary.rename(columns=rename_dict, inplace=True)
-                            weekly_summary.to_excel(writer, sheet_name='Weekly Timeline', index=False)
+                        <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                """
                 
-                # Add formatting
-                workbook = writer.book
-                header_format = workbook.add_format({
-                    'bold': True,
-                    'bg_color': '#2e7d32',
-                    'font_color': 'white',
-                    'border': 1
-                })
-                
-                # Apply header formatting to all sheets
-                for sheet_name in writer.sheets:
-                    worksheet = writer.sheets[sheet_name]
-                    worksheet.set_column(0, 20, 15)  # Default column width
-                    worksheet.freeze_panes(1, 0)  # Freeze header row
-            
-            output.seek(0)
-            return output
-            
-        except Exception as e:
-            logger.error(f"Error creating PO schedule Excel: {e}", exc_info=True)
-            return None
-    
-    def _create_critical_alerts_excel(self, data_dict: Dict) -> Optional[io.BytesIO]:
-        """Create Excel attachment for critical alerts"""
-        output = io.BytesIO()
-        
-        try:
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Sheet 1: Overdue POs
-                if 'overdue_pos' in data_dict and not data_dict['overdue_pos'].empty:
-                    data_dict['overdue_pos'].to_excel(writer, sheet_name='Overdue POs', index=False)
-                
-                # Sheet 2: Pending Stock-in
-                if 'pending_stockin' in data_dict and not data_dict['pending_stockin'].empty:
-                    data_dict['pending_stockin'].to_excel(writer, sheet_name='Pending Stock-in', index=False)
-                
-                # Add formatting
-                workbook = writer.book
-                header_format = workbook.add_format({
-                    'bold': True,
-                    'bg_color': '#d32f2f',
-                    'font_color': 'white',
-                    'border': 1
-                })
-                
-                # Apply formatting
-                for sheet_name in writer.sheets:
-                    worksheet = writer.sheets[sheet_name]
-                    worksheet.set_column(0, 20, 15)
-                    worksheet.freeze_panes(1, 0)
-            
-            output.seek(0)
-            return output
-            
-        except Exception as e:
-            logger.error(f"Error creating critical alerts Excel: {e}", exc_info=True)
-            return None
-    
-    def _create_pending_stockin_excel(self, can_df: pd.DataFrame) -> Optional[io.BytesIO]:
-        """Create Excel attachment for pending stock-in"""
-        output = io.BytesIO()
-        
-        try:
-            if can_df is None or can_df.empty:
-                logger.warning("Empty DataFrame provided for pending stock-in Excel")
-                return None
-                
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Sheet 1: All pending items
-                can_df.to_excel(writer, sheet_name='All Pending Items', index=False)
-                
-                # Sheet 2: Summary by age
-                can_df['days_category'] = pd.cut(can_df['days_since_arrival'], 
-                                                bins=[0, 3, 7, 14, float('inf')],
-                                                labels=['0-3 days', '4-7 days', '8-14 days', '> 14 days'])
-                
-                age_summary = can_df.groupby('days_category').agg({
-                    'arrival_note_number': 'count',
-                    'pending_quantity': 'sum',
-                    'pending_value_usd': 'sum'
-                }).reset_index()
-                age_summary.columns = ['Days Category', 'Item Count', 'Total Quantity', 'Total Value USD']
-                age_summary.to_excel(writer, sheet_name='Age Summary', index=False)
-                
-                # Sheet 3: Vendor Summary
-                if 'vendor' in can_df.columns:
-                    vendor_summary = can_df.groupby('vendor').agg({
-                        'arrival_note_number': 'nunique',
-                        'can_line_id': 'count',
-                        'pending_quantity': 'sum',
-                        'pending_value_usd': 'sum',
-                        'days_since_arrival': 'mean'
-                    }).reset_index()
-                    vendor_summary.columns = ['Vendor', 'CAN Count', 'Line Items', 'Total Quantity', 
-                                            'Total Value USD', 'Avg Days Pending']
-                    vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
-                
-                # Add formatting
-                workbook = writer.book
-                header_format = workbook.add_format({
-                    'bold': True,
-                    'bg_color': '#f57c00',
-                    'font_color': 'white',
-                    'border': 1
-                })
-                
-                # Apply formatting
-                for sheet_name in writer.sheets:
-                    worksheet = writer.sheets[sheet_name]
-                    worksheet.set_column(0, 20, 15)
-                    worksheet.freeze_panes(1, 0)
-            
-            output.seek(0)
-            return output
-            
-        except Exception as e:
-            logger.error(f"Error creating pending stock-in Excel: {e}", exc_info=True)
-            return None
-    
-    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None) -> Optional[io.BytesIO]:
-        """Create Excel for customs clearance"""
-        output = io.BytesIO()
-        
-        try:
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                # Sheet 1: Summary by Country
-                if not po_df.empty:
-                    country_summary = po_df.groupby('vendor_country_name').agg({
-                        'po_number': 'nunique',
-                        'vendor_name': 'nunique',
-                        'pending_standard_arrival_quantity': 'sum',
-                        'outstanding_arrival_amount_usd': 'sum'
-                    }).reset_index()
-                    country_summary.columns = ['Country', 'PO Count', 'Vendors', 'Total Quantity', 'Total Value USD']
-                    country_summary.to_excel(writer, sheet_name='Country Summary', index=False)
-                
-                # Sheet 2: PO Details
-                if not po_df.empty:
-                    po_df.to_excel(writer, sheet_name='PO Details', index=False)
-                
-                # Sheet 3: CAN Arrivals
-                if can_df is not None and not can_df.empty:
-                    can_df.to_excel(writer, sheet_name='CAN Arrivals', index=False)
+                # Add individual date links (show first 5)
+                for i, gcal_link in enumerate(google_cal_links[:5]):
+                    date_str = gcal_link['date'].strftime('%b %d')
+                    is_urgent = gcal_link.get('is_urgent', False)
+                    date_style = 'color: #d32f2f; font-weight: bold;' if is_urgent else 'font-weight: bold;'
                     
-                    # Sheet 4: CAN Summary by Date
-                    can_summary = can_df.groupby(['arrival_date', 'vendor_country_name']).agg({
-                        'arrival_note_number': 'nunique',
-                        'vendor': 'nunique',
-                        'pending_quantity': 'sum',
-                        'pending_value_usd': 'sum'
-                    }).reset_index()
-                    can_summary.columns = ['Arrival Date', 'Country', 'CAN Count', 'Vendors', 'Total Quantity', 'Total Value USD']
-                    can_summary.to_excel(writer, sheet_name='CAN Summary', index=False)
+                    html += f"""
+                            <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
+                                <span style="{date_style} display: inline-block; width: 80px;">{date_str}:</span>
+                                <a href="{gcal_link['link']}" target="_blank" 
+                                style="margin: 0 15px; color: #4285f4; text-decoration: none; font-weight: 500;">
+                                📅 Google Calendar
+                                </a>
+                                <a href="{outlook_cal_links[i]['link']}" target="_blank" 
+                                style="margin: 0 15px; color: #0078d4; text-decoration: none; font-weight: 500;">
+                                📅 Outlook
+                                </a>
+                            </div>
+                    """
                 
-                # Sheet 5: Combined Timeline
-                timeline_data = []
+                if len(google_cal_links) > 5:
+                    html += f"""
+                            <div style="margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; text-align: center;">
+                                <p style="font-style: italic; color: #999; margin: 0;">
+                                    ... and {len(google_cal_links) - 5} more dates
+                                </p>
+                            </div>
+                    """
                 
-                # Add PO data to timeline
-                if not po_df.empty:
-                    po_timeline = po_df.groupby(['etd', 'vendor_country_name']).agg({
-                        'po_number': 'nunique',
-                        'outstanding_arrival_amount_usd': 'sum'
-                    }).reset_index()
-                    po_timeline['Type'] = 'PO ETD'
-                    po_timeline.columns = ['Date', 'Country', 'Count', 'Value USD', 'Type']
-                    timeline_data.append(po_timeline)
+                html += """
+                        </div>
+                        
+                        <p style="margin-top: 20px; margin-bottom: 0; color: #666; font-size: 14px; text-align: center;">
+                            Or download the attached .ics file to import all dates into any calendar application
+                        </p>
+                    </div>
+                """
+        
+
+
+        # Add important reminders
+        html += """
+                <div style="margin-top: 30px; padding: 15px; background-color: #e3f2fd; border-radius: 5px;">
+                    <h4>📋 Important Reminders:</h4>
+                    <ul>
+                        <li><strong>Overdue POs:</strong> Please update ETDs and provide shipping status immediately</li>
+                        <li><strong>Documentation:</strong> Ensure all shipping documents are prepared in advance</li>
+                        <li><strong>Quality Certificates:</strong> Must accompany each shipment</li>
+                        <li><strong>ETD Changes:</strong> Notify us at least 3 days before original ETD</li>
+                        <li><strong>Contact:</strong> For any questions, reach our procurement team</li>
+                    </ul>
+                </div>
                 
-                # Add CAN data to timeline
-                if can_df is not None and not can_df.empty:
-                    can_timeline = can_df.groupby(['arrival_date', 'vendor_country_name']).agg({
-                        'arrival_note_number': 'nunique',
-                        'pending_value_usd': 'sum'
-                    }).reset_index()
-                    can_timeline['Type'] = 'CAN Arrival'
-                    can_timeline.columns = ['Date', 'Country', 'Count', 'Value USD', 'Type']
-                    timeline_data.append(can_timeline)
-                
-                if timeline_data:
-                    combined_timeline = pd.concat(timeline_data, ignore_index=True)
-                    combined_timeline = combined_timeline.sort_values(['Date', 'Type', 'Country'])
-                    combined_timeline.to_excel(writer, sheet_name='Combined Timeline', index=False)
-                
-                # Add formatting
-                workbook = writer.book
-                header_format = workbook.add_format({
-                    'bold': True,
-                    'bg_color': '#00796b',
-                    'font_color': 'white',
-                    'border': 1
-                })
-                
-                # Apply formatting
-                for sheet_name in writer.sheets:
-                    worksheet = writer.sheets[sheet_name]
-                    worksheet.set_column(0, 20, 15)
-                    worksheet.freeze_panes(1, 0)
-            
-            output.seek(0)
-            return output
-            
-        except Exception as e:
-            logger.error(f"Error creating customs Excel: {e}", exc_info=True)
-            return None
+                <div class="footer">
+                    <p>This is an automated email from Prostech Inbound Logistics</p>
+                    <p>For questions, please contact: <a href="mailto:procurement@prostech.vn">procurement@prostech.vn</a></p>
+                    <p>Phone: +84 33 476273</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
+
+

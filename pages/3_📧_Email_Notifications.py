@@ -187,6 +187,12 @@ if 'notification_type' not in st.session_state:
     st.session_state.notification_type = '📅 PO Schedule'
 if 'weeks_ahead' not in st.session_state:
     st.session_state.weeks_ahead = 4
+if 'recipient_type' not in st.session_state:
+    st.session_state.recipient_type = 'creators'
+if 'selected_vendors' not in st.session_state:
+    st.session_state.selected_vendors = []
+if 'selected_vendor_contacts' not in st.session_state:
+    st.session_state.selected_vendor_contacts = []
 
 # Email configuration section
 col1, col2 = st.columns([2, 1])
@@ -233,7 +239,6 @@ with col2:
         ["Send Now", "Preview Only"],
         index=1
     )
-# Continuation of Email_Notifications.py - Part 2
 
 # Now load creators data based on notification type
 creators_df = pd.DataFrame()  # Initialize empty
@@ -249,9 +254,8 @@ with col1:
     
     # Initialize variables
     selected_creators = []
+    selected_vendor_contacts = []
     custom_recipients = []
-    recipient_type = None
-    selection_mode = None
     
     # Special handling for Custom Clearance
     if notification_type == "🛃 Custom Clearance":
@@ -279,36 +283,33 @@ with col1:
         recipient_type = "customs"
     
     else:
-        # Creator selection for other notification types
-        if not creators_df.empty:
-            # Selection mode
-            selection_mode = st.radio(
-                "Select recipients",
-                ["All Creators", "Selected Creators Only", "Custom Recipients"],
-                horizontal=True
-            )
-            
-            if selection_mode == "All Creators":
-                selected_creators = creators_df['name'].tolist()
-                custom_recipients = []
-                
-                if notification_type == "🚨 Critical Alerts":
-                    total_overdue = creators_df['overdue_pos'].sum()
-                    total_pending_cans = creators_df['pending_cans'].sum()
-                    st.info(f"Will send to {len(selected_creators)} creators with {total_overdue} overdue POs and {total_pending_cans} pending CANs")
-                elif notification_type == "📦 Pending Stock-in":
-                    total_pending_cans = creators_df['pending_cans'].sum() if 'pending_cans' in creators_df.columns else 0
-                    total_urgent = creators_df['urgent_cans'].sum() if 'urgent_cans' in creators_df.columns else 0
-                    st.info(f"Will send to {len(selected_creators)} creators with {total_pending_cans} pending CANs ({total_urgent} urgent)")
-                else:
-                    st.info(f"Will send to all {len(selected_creators)} PO creators")
-                    
-            elif selection_mode == "Selected Creators Only":
+        # Recipient type selection (simplified)
+        recipient_type = st.selectbox(
+            "Send to:",
+            ["creators", "vendors", "custom"],
+            format_func=lambda x: {
+                "creators": "📝 PO Creators",
+                "vendors": "🏢 Vendors",
+                "custom": "✉️ Custom Recipients"
+            }[x],
+            index=["creators", "vendors", "custom"].index(st.session_state.get('recipient_type', 'creators'))
+        )
+        
+        # Update session state if changed
+        if recipient_type != st.session_state.recipient_type:
+            st.session_state.recipient_type = recipient_type
+            st.session_state.selected_vendors = []
+            st.session_state.selected_vendor_contacts = []
+            st.rerun()
+        
+        # Handle different recipient types
+        if recipient_type == "creators":
+            if not creators_df.empty:
                 # Format function based on notification type
                 if notification_type == "🚨 Critical Alerts":
                     def format_func(x):
                         creator = creators_df[creators_df['name']==x].iloc[0]
-                        return f"{x} (Overdue POs: {creator['overdue_pos']}, Pending CANs: {creator['pending_cans']})"
+                        return f"{x} (Overdue: {creator['overdue_pos']}, Pending: {creator['pending_cans']})"
                 elif notification_type == "📦 Pending Stock-in":
                     def format_func(x):
                         creator = creators_df[creators_df['name']==x].iloc[0]
@@ -321,93 +322,163 @@ with col1:
                         return f"{x} ({creator['active_pos']} POs, ${creator['total_outstanding_value']/1000:.0f}K)"
                 
                 selected_creators = st.multiselect(
-                    "Choose PO creators",
+                    "Select PO creators:",
                     options=creators_df['name'].tolist(),
                     default=None,
-                    format_func=format_func
-                )
-                custom_recipients = []
-                
-            else:  # Custom Recipients
-                selected_creators = []
-                st.markdown("#### Enter Custom Recipients")
-                custom_email_text = st.text_area(
-                    "Email addresses (one per line)",
-                    placeholder="john.doe@prostech.vn\njane.smith@prostech.vn\nprocurement.team@prostech.vn",
-                    height=150,
-                    help="Enter email addresses of recipients who should receive the notification"
+                    format_func=format_func,
+                    help="Choose one or more PO creators"
                 )
                 
-                if custom_email_text:
-                    # Parse and validate emails
-                    custom_emails = [email.strip() for email in custom_email_text.split('\n') if email.strip()]
-                    valid_emails = []
-                    invalid_emails = []
+                # Show selected creators summary
+                if selected_creators:
+                    selected_df = creators_df[creators_df['name'].isin(selected_creators)]
                     
-                    for email in custom_emails:
-                        if validate_email(email):
-                            valid_emails.append(email)
-                        else:
-                            invalid_emails.append(email)
-                    
-                    if invalid_emails:
-                        st.error(f"❌ Invalid email addresses: {', '.join(invalid_emails)}")
-                    
-                    if valid_emails:
-                        custom_recipients = valid_emails
-                        st.success(f"✅ {len(valid_emails)} valid email addresses")
+                    if notification_type == "🚨 Critical Alerts":
+                        display_df = selected_df[['name', 'email', 'overdue_pos', 'pending_cans', 'max_days_overdue']].copy()
+                        display_df.columns = ['Name', 'Email', 'Overdue POs', 'Pending CANs', 'Max Days Overdue']
+                    elif notification_type == "📦 Pending Stock-in":
+                        display_cols = ['name', 'email', 'pending_cans', 'urgent_cans', 'total_pending_value', 'max_days_pending']
+                        display_cols = [col for col in display_cols if col in selected_df.columns]
+                        display_df = selected_df[display_cols].copy()
                         
-                        # Display valid emails
-                        custom_df = pd.DataFrame({
-                            'Email': valid_emails,
-                            'Status': ['✅ Valid'] * len(valid_emails)
-                        })
-                        st.dataframe(custom_df, use_container_width=True, hide_index=True)
-                else:
-                    custom_recipients = []
-            
-            # Show selected creators/recipients summary
-            if selection_mode != "Custom Recipients" and selected_creators:
-                selected_df = creators_df[creators_df['name'].isin(selected_creators)]
-                
-                if notification_type == "🚨 Critical Alerts":
-                    display_df = selected_df[['name', 'email', 'overdue_pos', 'pending_cans', 'max_days_overdue']].copy()
-                    display_df.columns = ['Name', 'Email', 'Overdue POs', 'Pending CANs', 'Max Days Overdue']
-                elif notification_type == "📦 Pending Stock-in":
-                    # Display columns for pending stock-in
-                    display_cols = ['name', 'email', 'pending_cans', 'urgent_cans', 'total_pending_value', 'max_days_pending']
-                    display_cols = [col for col in display_cols if col in selected_df.columns]
-                    display_df = selected_df[display_cols].copy()
+                        rename_map = {
+                            'name': 'Name',
+                            'email': 'Email', 
+                            'pending_cans': 'Pending CANs',
+                            'urgent_cans': 'Urgent (>7 days)',
+                            'total_pending_value': 'Total Value',
+                            'max_days_pending': 'Max Days Pending'
+                        }
+                        display_df.rename(columns=rename_map, inplace=True)
+                        
+                        if 'Total Value' in display_df.columns:
+                            display_df['Total Value'] = display_df['Total Value'].apply(lambda x: f"${x/1000:.0f}K")
+                    else:
+                        display_df = selected_df[['name', 'email', 'active_pos', 'total_outstanding_value', 'international_pos']].copy()
+                        display_df['total_outstanding_value'] = display_df['total_outstanding_value'].apply(lambda x: f"${x/1000:.0f}K")
+                        display_df.columns = ['Name', 'Email', 'Active POs', 'Outstanding Value', 'Intl POs']
                     
-                    # Rename columns
-                    rename_map = {
-                        'name': 'Name',
-                        'email': 'Email', 
-                        'pending_cans': 'Pending CANs',
-                        'urgent_cans': 'Urgent (>7 days)',
-                        'total_pending_value': 'Total Value',
-                        'max_days_pending': 'Max Days Pending'
-                    }
-                    display_df.rename(columns=rename_map, inplace=True)
-                    
-                    # Format value column
-                    if 'Total Value' in display_df.columns:
-                        display_df['Total Value'] = display_df['Total Value'].apply(lambda x: f"${x/1000:.0f}K")
-                else:
-                    display_df = selected_df[['name', 'email', 'active_pos', 'total_outstanding_value', 'international_pos']].copy()
-                    display_df['total_outstanding_value'] = display_df['total_outstanding_value'].apply(lambda x: f"${x/1000:.0f}K")
-                    display_df.columns = ['Name', 'Email', 'Active POs', 'Outstanding Value', 'Intl POs']
-                
-                st.dataframe(display_df, use_container_width=True, hide_index=True)
-            elif selection_mode == "Custom Recipients" and not custom_recipients:
-                st.warning("Please enter at least one valid email address")
-        else:
-            if notification_type == "🚨 Critical Alerts":
-                st.warning("No creators with overdue POs or pending CANs found")
-            elif notification_type == "📦 Pending Stock-in":
-                st.warning("No creators with pending stock-in items found")
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
             else:
-                st.warning("No creators with active POs found")
+                if notification_type == "🚨 Critical Alerts":
+                    st.warning("No creators with overdue POs or pending CANs found")
+                elif notification_type == "📦 Pending Stock-in":
+                    st.warning("No creators with pending stock-in items found")
+                else:
+                    st.warning("No creators with active POs found")
+        
+        elif recipient_type == "vendors":
+            # Load vendors with active POs
+            vendors_df = data_loader.get_vendors_with_active_pos()
+            
+            if not vendors_df.empty:
+                # First step: Select vendors
+                vendor_names = vendors_df['vendor_name'].unique().tolist()
+                
+                def format_vendor(vendor_name):
+                    vendor_info = vendors_df[vendors_df['vendor_name'] == vendor_name].iloc[0]
+                    return f"{vendor_name} ({vendor_info['active_pos']} POs, ${vendor_info['outstanding_value']/1000:.0f}K)"
+                
+                selected_vendor_names = st.multiselect(
+                    "Select vendors:",
+                    options=vendor_names,
+                    default=st.session_state.selected_vendors,
+                    format_func=format_vendor,
+                    key="vendor_select"
+                )
+                
+                # Update session state
+                if selected_vendor_names != st.session_state.selected_vendors:
+                    st.session_state.selected_vendors = selected_vendor_names
+                    st.session_state.selected_vendor_contacts = []
+                
+                # Second step: Select contacts for selected vendors
+                if selected_vendor_names:
+                    # Get all contacts for selected vendors
+                    selected_vendors_df = vendors_df[vendors_df['vendor_name'].isin(selected_vendor_names)]
+                    
+                    # Display vendor summary
+                    vendor_summary = selected_vendors_df.groupby('vendor_name').agg({
+                        'active_pos': 'sum',
+                        'outstanding_value': 'sum',
+                        'vendor_email': 'count'
+                    }).reset_index()
+                    vendor_summary.columns = ['Vendor', 'Active POs', 'Outstanding Value', 'Available Contacts']
+                    vendor_summary['Outstanding Value'] = vendor_summary['Outstanding Value'].apply(lambda x: f"${x/1000:.0f}K")
+                    
+                    st.markdown("#### Selected Vendors Summary")
+                    st.dataframe(vendor_summary, use_container_width=True, hide_index=True)
+                    
+                    # Get vendor contacts
+                    vendor_contacts = data_loader.get_vendor_contacts(selected_vendor_names)
+                    
+                    if not vendor_contacts.empty:
+                        # Format contacts for display
+                        def format_contact(contact_id):
+                            contact = vendor_contacts[vendor_contacts['contact_id'] == contact_id].iloc[0]
+                            return f"{contact['contact_name']} - {contact['vendor_name']} ({contact['vendor_email']})"
+                        
+                        selected_contact_ids = st.multiselect(
+                            "Select vendor contacts to send to:",
+                            options=vendor_contacts['contact_id'].tolist(),
+                            default=[c['contact_id'] for c in st.session_state.selected_vendor_contacts],
+                            format_func=format_contact,
+                            key="contact_select"
+                        )
+                        
+                        # Update selected contacts in session state
+                        if selected_contact_ids:
+                            selected_vendor_contacts = vendor_contacts[vendor_contacts['contact_id'].isin(selected_contact_ids)].to_dict('records')
+                            st.session_state.selected_vendor_contacts = selected_vendor_contacts
+                            
+                            # Display selected contacts
+                            st.markdown("#### Selected Contacts")
+                            contact_display_df = pd.DataFrame(selected_vendor_contacts)[['vendor_name', 'contact_name', 'vendor_email']]
+                            contact_display_df.columns = ['Vendor', 'Contact Name', 'Email']
+                            st.dataframe(contact_display_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("No contacts found for selected vendors")
+                else:
+                    st.info("Please select vendors to see available contacts")
+            else:
+                st.warning("No vendors with active POs found")
+        
+        else:  # custom recipients
+            st.markdown("#### Enter Custom Recipients")
+            custom_email_text = st.text_area(
+                "Email addresses (one per line)",
+                placeholder="john.doe@prostech.vn\njane.smith@prostech.vn\nprocurement.team@prostech.vn",
+                height=150,
+                help="Enter email addresses of recipients who should receive the notification"
+            )
+            
+            if custom_email_text:
+                # Parse and validate emails
+                custom_emails = [email.strip() for email in custom_email_text.split('\n') if email.strip()]
+                valid_emails = []
+                invalid_emails = []
+                
+                for email in custom_emails:
+                    if validate_email(email):
+                        valid_emails.append(email)
+                    else:
+                        invalid_emails.append(email)
+                
+                if invalid_emails:
+                    st.error(f"❌ Invalid email addresses: {', '.join(invalid_emails)}")
+                
+                if valid_emails:
+                    custom_recipients = valid_emails
+                    st.success(f"✅ {len(valid_emails)} valid email addresses")
+                    
+                    # Display valid emails
+                    custom_df = pd.DataFrame({
+                        'Email': valid_emails,
+                        'Status': ['✅ Valid'] * len(valid_emails)
+                    })
+                    st.dataframe(custom_df, use_container_width=True, hide_index=True)
+            else:
+                custom_recipients = []
 
 # CC settings section (back in col2)
 with col2:
@@ -423,22 +494,23 @@ with col2:
         )
     else:
         # CC to managers for creator notifications
-        include_cc = st.checkbox("Include CC to managers", value=True)
-        
-        if include_cc and selected_creators and not creators_df.empty and selection_mode != "Custom Recipients":
-            # Get unique manager emails from selected creators
-            selected_df = creators_df[creators_df['name'].isin(selected_creators)]
+        if recipient_type == "creators":
+            include_cc = st.checkbox("Include CC to managers", value=True)
             
-            # Check if manager_email column exists
-            if 'manager_email' in selected_df.columns:
-                manager_emails = selected_df[selected_df['manager_email'].notna()]['manager_email'].unique().tolist()
+            if include_cc and selected_creators and not creators_df.empty:
+                # Get unique manager emails from selected creators
+                selected_df = creators_df[creators_df['name'].isin(selected_creators)]
                 
-                if manager_emails:
-                    st.info(f"Managers will be CC'd: {', '.join(manager_emails)}")
-                    cc_emails.extend(manager_emails)
-            else:
-                if notification_type == "🚨 Critical Alerts":
-                    st.info("Manager CC not available for Critical Alerts. You can add managers manually below.")
+                # Check if manager_email column exists
+                if 'manager_email' in selected_df.columns:
+                    manager_emails = selected_df[selected_df['manager_email'].notna()]['manager_email'].unique().tolist()
+                    
+                    if manager_emails:
+                        st.info(f"Managers will be CC'd: {', '.join(manager_emails)}")
+                        cc_emails.extend(manager_emails)
+                else:
+                    if notification_type == "🚨 Critical Alerts":
+                        st.info("Manager CC not available for Critical Alerts. You can add managers manually below.")
     
     # Additional CC emails
     st.markdown("#### Additional CC Recipients")
@@ -474,21 +546,28 @@ with col2:
 
 st.markdown("---")
 
-# Continuation of Email_Notifications.py - Part 3
-
 # Preview section
+show_preview = False
 if notification_type == "🛃 Custom Clearance":
-    if st.button("👁️ Preview Email Content", type="secondary"):
-        with st.spinner("Generating customs clearance preview..."):
-            try:
-                # Get international POs
+    show_preview = True
+elif recipient_type == "creators" and selected_creators:
+    show_preview = True
+elif recipient_type == "vendors" and st.session_state.selected_vendor_contacts:
+    show_preview = True
+elif recipient_type == "custom" and custom_recipients:
+    show_preview = True
+
+if show_preview and st.button("👁️ Preview Email Content", type="secondary"):
+    with st.spinner("Generating preview..."):
+        try:
+            if notification_type == "🛃 Custom Clearance":
+                # Custom clearance preview
                 po_filters = {
                     'etd_from': datetime.now().date(),
                     'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                 }
                 intl_pos = data_loader.load_po_data_for_customs(po_filters)
                 
-                # Get international CANs
                 can_filters = {
                     'arrival_date_from': datetime.now().date(),
                     'arrival_date_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
@@ -498,12 +577,10 @@ if notification_type == "🛃 Custom Clearance":
                 if intl_pos is not None and (not intl_pos.empty or (intl_cans is not None and not intl_cans.empty)):
                     st.subheader("📧 Preview - Custom Clearance Schedule")
                     
-                    # Tab view for POs and CANs
                     tab1, tab2 = st.tabs(["📅 Purchase Orders ETD", "📦 Container Arrivals"])
                     
                     with tab1:
                         if intl_pos is not None and not intl_pos.empty:
-                            # Group by country
                             country_summary = intl_pos.groupby('vendor_country_name').agg({
                                 'po_number': 'nunique',
                                 'vendor_name': 'nunique',
@@ -515,21 +592,12 @@ if notification_type == "🛃 Custom Clearance":
                             country_summary['Value USD'] = country_summary['Value USD'].apply(lambda x: f"${x:,.0f}")
                             st.dataframe(country_summary, use_container_width=True, hide_index=True)
                             
-                            # Show sample POs
-                            st.markdown("#### Sample International POs (First 10)")
-                            display_cols = ['etd', 'po_number', 'vendor_name', 'vendor_country_name', 
-                                        'pt_code', 'product_name', 'pending_standard_arrival_quantity', 
-                                        'outstanding_arrival_amount_usd']
-                            display_df = intl_pos.head(10)[display_cols]
-                            st.dataframe(display_df, use_container_width=True, hide_index=True)
-                            
                             st.caption(f"Total {len(intl_pos)} international PO lines")
                         else:
                             st.info("No international POs found for the selected period")
                     
                     with tab2:
                         if intl_cans is not None and not intl_cans.empty:
-                            # Group by arrival date
                             date_summary = intl_cans.groupby(['arrival_date', 'vendor_country_name']).agg({
                                 'arrival_note_number': 'nunique',
                                 'vendor': 'nunique',
@@ -541,35 +609,145 @@ if notification_type == "🛃 Custom Clearance":
                             date_summary['Value USD'] = date_summary['Value USD'].apply(lambda x: f"${x:,.0f}")
                             st.dataframe(date_summary, use_container_width=True, hide_index=True)
                             
-                            # Show sample CANs
-                            st.markdown("#### Sample Container Arrivals (First 10)")
-                            display_cols = ['arrival_date', 'arrival_note_number', 'vendor', 'vendor_country_name',
-                                        'pt_code', 'product_name', 'pending_quantity', 'pending_value_usd']
-                            display_df = intl_cans.head(10)[display_cols]
-                            st.dataframe(display_df, use_container_width=True, hide_index=True)
-                            
                             st.caption(f"Total {len(intl_cans)} international CAN lines")
                         else:
                             st.info("No international container arrivals found for the selected period")
                 else:
                     st.warning(f"No international shipments found for the next {weeks_ahead} weeks")
-            except Exception as e:
-                st.error(f"Error generating preview: {str(e)}")
-                logger.error(f"Error in customs preview: {e}")
-
-elif (selected_creators or custom_recipients) and st.button("👁️ Preview Email Content", type="secondary"):
-    with st.spinner("Generating preview..."):
-        try:
-            # Determine preview recipient
-            if custom_recipients:
-                # For custom recipients, show general preview
+                    
+            elif recipient_type == "vendors" and st.session_state.selected_vendor_contacts:
+                # Vendor preview - show first vendor contact
+                contact = st.session_state.selected_vendor_contacts[0]
+                st.subheader(f"📧 Preview for {contact['vendor_name']} - {contact['contact_name']}")
+                
+                if notification_type == "📅 PO Schedule":
+                    # Get POs for this vendor
+                    po_df = data_loader.get_vendor_pos(contact['vendor_name'], weeks_ahead)
+                    
+                    if po_df is not None and not po_df.empty:
+                        # Separate overdue and upcoming
+                        po_df['etd'] = pd.to_datetime(po_df['etd'])
+                        today = datetime.now().date()
+                        
+                        overdue_pos = po_df[po_df['etd'].dt.date < today]
+                        upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total POs", po_df['po_number'].nunique())
+                        with col2:
+                            st.metric("Overdue", overdue_pos['po_number'].nunique() if not overdue_pos.empty else 0)
+                        with col3:
+                            st.metric("Upcoming", upcoming_pos['po_number'].nunique() if not upcoming_pos.empty else 0)
+                        with col4:
+                            st.metric("Total Value", f"${po_df['outstanding_arrival_amount_usd'].sum()/1000:.0f}K")
+                        
+                        if not overdue_pos.empty:
+                            st.markdown("#### 🚨 Overdue POs")
+                            display_cols = ['etd', 'po_number', 'pt_code', 'product_name', 
+                                          'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
+                            st.dataframe(overdue_pos.head(5)[display_cols], use_container_width=True, hide_index=True)
+                        
+                        if not upcoming_pos.empty:
+                            st.markdown("#### 📅 Upcoming POs")
+                            display_cols = ['etd', 'po_number', 'pt_code', 'product_name', 
+                                          'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
+                            st.dataframe(upcoming_pos.head(5)[display_cols], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No POs found for this vendor")
+                else:
+                    st.warning(f"{notification_type} is not available for vendor recipients")
+                    
+            elif recipient_type == "creators" and selected_creators:
+                # Creator preview (existing logic)
+                preview_creator = creators_df[creators_df['name'] == selected_creators[0]].iloc[0]
+                preview_email = preview_creator['email']
+                preview_name = preview_creator['name']
+                
+                st.subheader(f"📧 Preview for {preview_name}")
+                
+                if notification_type == "📅 PO Schedule":
+                    filters = {
+                        'created_by': preview_email,
+                        'etd_from': datetime.now().date(),
+                        'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                    }
+                    preview_df = data_loader.load_po_data(filters)
+                    
+                    if preview_df is not None and not preview_df.empty:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("POs", preview_df['po_number'].nunique())
+                        with col2:
+                            st.metric("Vendors", preview_df['vendor_name'].nunique())
+                        with col3:
+                            st.metric("Value", f"${preview_df['outstanding_arrival_amount_usd'].sum()/1000:.0f}K")
+                        with col4:
+                            overdue = preview_df[pd.to_datetime(preview_df['etd']) < datetime.now()]
+                            st.metric("Overdue", len(overdue))
+                        
+                        st.markdown("#### Sample POs")
+                        display_cols = ['etd', 'po_number', 'vendor_name', 'pt_code', 'product_name', 
+                                      'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
+                        st.dataframe(preview_df.head(5)[display_cols], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No POs found for this creator")
+                        
+                elif notification_type == "🚨 Critical Alerts":
+                    overdue_pos = data_loader.get_overdue_pos_by_creator(preview_email)
+                    pending_cans = data_loader.get_pending_cans_by_creator(preview_email)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Overdue POs", len(overdue_pos) if overdue_pos is not None and not overdue_pos.empty else 0)
+                    with col2:
+                        st.metric("Pending CANs > 7 days", len(pending_cans) if pending_cans is not None and not pending_cans.empty else 0)
+                    
+                    if overdue_pos is not None and not overdue_pos.empty:
+                        st.markdown("#### Overdue Purchase Orders")
+                        st.dataframe(overdue_pos.head(5), use_container_width=True, hide_index=True)
+                    
+                    if pending_cans is not None and not pending_cans.empty:
+                        st.markdown("#### Pending Stock-in Items")
+                        display_cols = ['arrival_note_number', 'vendor', 'product_name', 'pt_code', 
+                                      'pending_quantity', 'days_since_arrival']
+                        st.dataframe(pending_cans.head(5)[display_cols], use_container_width=True, hide_index=True)
+                        
+                elif notification_type == "📦 Pending Stock-in":
+                    preview_df = data_loader.get_pending_cans_by_creator(preview_email)
+                    
+                    if preview_df is not None and not preview_df.empty:
+                        preview_df['urgency'] = pd.cut(preview_df['days_since_arrival'], 
+                                                      bins=[0, 3, 7, 14, float('inf')],
+                                                      labels=['Low', 'Medium', 'High', 'Critical'])
+                        
+                        urgency_summary = preview_df['urgency'].value_counts()
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Total Items", len(preview_df))
+                        with col2:
+                            st.metric("Critical", urgency_summary.get('Critical', 0))
+                        with col3:
+                            st.metric("High", urgency_summary.get('High', 0))
+                        with col4:
+                            st.metric("Value", f"${preview_df['pending_value_usd'].sum()/1000:.0f}K")
+                        
+                        st.markdown("#### Sample Pending Items")
+                        display_cols = ['arrival_note_number', 'vendor', 'product_name',
+                                      'pt_code', 'pending_quantity', 'days_since_arrival']
+                        st.dataframe(preview_df.head(10)[display_cols], use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No pending stock-in items for this creator")
+                        
+            elif recipient_type == "custom" and custom_recipients:
+                # Custom recipient preview
                 preview_email = custom_recipients[0]
                 preview_name = preview_email.split('@')[0].title()
                 
                 st.subheader(f"📧 Preview for Custom Recipients")
                 st.caption(f"Sample preview for: {preview_email}")
                 
-                # Get data based on notification type
                 if notification_type == "📅 PO Schedule":
                     filters = {
                         'etd_from': datetime.now().date(),
@@ -591,7 +769,6 @@ elif (selected_creators or custom_recipients) and st.button("👁️ Preview Ema
                         
                         st.info(f"Note: Custom recipients will receive a general PO schedule overview for the next {weeks_ahead} weeks")
                         
-                        # Show sample POs
                         st.markdown("#### Sample POs (First 10)")
                         display_cols = ['etd', 'po_number', 'vendor_name', 'pt_code', 'product_name', 
                                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
@@ -599,170 +776,49 @@ elif (selected_creators or custom_recipients) and st.button("👁️ Preview Ema
                     else:
                         st.warning("No PO data found for preview")
                         
-                elif notification_type == "🚨 Critical Alerts":
-                    # Get all critical items
-                    overdue_pos = data_loader.get_overdue_pos()
-                    pending_cans = data_loader.load_can_pending_data({'min_days_pending': 7})
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Overdue POs", len(overdue_pos) if overdue_pos is not None and not overdue_pos.empty else 0)
-                    with col2:
-                        st.metric("Pending CANs > 7 days", len(pending_cans) if pending_cans is not None and not pending_cans.empty else 0)
-                    
-                    if overdue_pos is not None and not overdue_pos.empty:
-                        st.markdown("#### Overdue Purchase Orders (First 5)")
-                        st.dataframe(overdue_pos.head(5), use_container_width=True, hide_index=True)
-                    
-                    if pending_cans is not None and not pending_cans.empty:
-                        st.markdown("#### Pending Stock-in Items (First 5)")
-                        display_cols = ['arrival_note_number', 'vendor', 'product_name', 'pt_code', 
-                                      'pending_quantity', 'days_since_arrival']
-                        st.dataframe(pending_cans.head(5)[display_cols], use_container_width=True, hide_index=True)
-                        
-                elif notification_type == "📦 Pending Stock-in":
-                    # Get all pending CANs
-                    pending_df = data_loader.load_can_pending_data()
-                    
-                    if pending_df is not None and not pending_df.empty:
-                        # Summary by urgency
-                        pending_df['urgency'] = pd.cut(pending_df['days_since_arrival'], 
-                                                      bins=[0, 3, 7, 14, float('inf')],
-                                                      labels=['Low', 'Medium', 'High', 'Critical'])
-                        
-                        urgency_summary = pending_df['urgency'].value_counts()
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Total Items", len(pending_df))
-                        with col2:
-                            st.metric("Critical (>14 days)", urgency_summary.get('Critical', 0))
-                        with col3:
-                            st.metric("High (8-14 days)", urgency_summary.get('High', 0))
-                        with col4:
-                            st.metric("Total Value", f"${pending_df['pending_value_usd'].sum()/1000:.0f}K")
-                        
-                        # Show sample items
-                        st.markdown("#### Sample Pending Items (First 10)")
-                        display_cols = ['arrival_note_number', 'vendor', 'product_name',
-                                       'pt_code', 'pending_quantity', 'days_since_arrival']
-                        st.dataframe(pending_df.head(10)[display_cols], use_container_width=True, hide_index=True)
-                    else:
-                        st.warning("No pending stock-in items found")
-                        
-            else:
-                # For selected creators, show creator-specific preview
-                if not creators_df.empty and selected_creators:
-                    preview_creator = creators_df[creators_df['name'] == selected_creators[0]].iloc[0]
-                    preview_email = preview_creator['email']
-                    preview_name = preview_creator['name']
-                    
-                    st.subheader(f"📧 Preview for {preview_name}")
-                    
-                    if notification_type == "📅 PO Schedule":
-                        filters = {
-                            'created_by': preview_email,
-                            'etd_from': datetime.now().date(),
-                            'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
-                        }
-                        preview_df = data_loader.load_po_data(filters)
-                        
-                        if preview_df is not None and not preview_df.empty:
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("POs", preview_df['po_number'].nunique())
-                            with col2:
-                                st.metric("Vendors", preview_df['vendor_name'].nunique())
-                            with col3:
-                                st.metric("Value", f"${preview_df['outstanding_arrival_amount_usd'].sum()/1000:.0f}K")
-                            with col4:
-                                overdue = preview_df[pd.to_datetime(preview_df['etd']) < datetime.now()]
-                                st.metric("Overdue", len(overdue))
-                            
-                            # Show sample POs
-                            st.markdown("#### Sample POs")
-                            display_cols = ['etd', 'po_number', 'vendor_name', 'pt_code', 'product_name', 
-                                          'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
-                            st.dataframe(preview_df.head(5)[display_cols], use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No POs found for this creator")
-                        
-                    elif notification_type == "🚨 Critical Alerts":
-                        overdue_pos = data_loader.get_overdue_pos_by_creator(preview_email)
-                        pending_cans = data_loader.get_pending_cans_by_creator(preview_email)
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.metric("Overdue POs", len(overdue_pos) if overdue_pos is not None and not overdue_pos.empty else 0)
-                        with col2:
-                            st.metric("Pending CANs > 7 days", len(pending_cans) if pending_cans is not None and not pending_cans.empty else 0)
-                        
-                        if overdue_pos is not None and not overdue_pos.empty:
-                            st.markdown("#### Overdue Purchase Orders")
-                            st.dataframe(overdue_pos.head(5), use_container_width=True, hide_index=True)
-                        
-                        if pending_cans is not None and not pending_cans.empty:
-                            st.markdown("#### Pending Stock-in Items")
-                            display_cols = ['arrival_note_number', 'vendor', 'product_name', 'pt_code', 
-                                          'pending_quantity', 'days_since_arrival']
-                            st.dataframe(pending_cans.head(5)[display_cols], use_container_width=True, hide_index=True)
-                            
-                    elif notification_type == "📦 Pending Stock-in":
-                        preview_df = data_loader.get_pending_cans_by_creator(preview_email)
-                        
-                        if preview_df is not None and not preview_df.empty:
-                            # Summary
-                            preview_df['urgency'] = pd.cut(preview_df['days_since_arrival'], 
-                                                          bins=[0, 3, 7, 14, float('inf')],
-                                                          labels=['Low', 'Medium', 'High', 'Critical'])
-                            
-                            urgency_summary = preview_df['urgency'].value_counts()
-                            
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Total Items", len(preview_df))
-                            with col2:
-                                st.metric("Critical", urgency_summary.get('Critical', 0))
-                            with col3:
-                                st.metric("High", urgency_summary.get('High', 0))
-                            with col4:
-                                st.metric("Value", f"${preview_df['pending_value_usd'].sum()/1000:.0f}K")
-                            
-                            # Show items
-                            st.markdown("#### Sample Pending Items")
-                            display_cols = ['arrival_note_number', 'vendor', 'product_name',
-                                          'pt_code', 'pending_quantity', 'days_since_arrival']
-                            st.dataframe(preview_df.head(10)[display_cols], use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No pending stock-in items for this creator")
-                else:
-                    st.warning("No creator selected or creator data not available")
-                    
         except Exception as e:
             st.error(f"Error generating preview: {str(e)}")
             logger.error(f"Error in preview: {e}", exc_info=True)
 
-
-# Continuation of Email_Notifications.py - Part 4 (Final)
-
 # Send emails section
-if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom_recipients) 
-    and schedule_type == "Send Now"):
-    
+ready_to_send = False
+if notification_type == "🛃 Custom Clearance":
+    ready_to_send = True
+elif recipient_type == "creators" and selected_creators:
+    ready_to_send = True
+elif recipient_type == "vendors" and st.session_state.selected_vendor_contacts:
+    ready_to_send = True
+elif recipient_type == "custom" and custom_recipients:
+    ready_to_send = True
+
+if ready_to_send and schedule_type == "Send Now":
     st.markdown("---")
     st.subheader("📤 Send Emails")
     
-    # Warning message based on notification type
+    # Warning message based on notification type and recipient type
     if notification_type == "🛃 Custom Clearance":
         st.warning(f"⚠️ You are about to send international PO schedule ({weeks_ahead} weeks) to custom.clearance@prostech.vn")
         if cc_emails:
             st.info(f"CC: {', '.join(cc_emails)}")
-    elif custom_recipients:
+    
+    elif recipient_type == "vendors":
+        if notification_type == "📅 PO Schedule":
+            num_contacts = len(st.session_state.selected_vendor_contacts)
+            st.warning(f"⚠️ You are about to send PO Schedule ({weeks_ahead} weeks) to {num_contacts} vendor contacts")
+            st.info("📌 Email will include: Overdue POs + Upcoming POs for selected period")
+        else:
+            st.error(f"❌ {notification_type} is not available for vendor recipients")
+            st.stop()
+        if cc_emails:
+            st.info(f"CC: {', '.join(cc_emails)}")
+    
+    elif recipient_type == "custom":
         period_info = f" ({weeks_ahead} weeks)" if notification_type == "📅 PO Schedule" else ""
         st.warning(f"⚠️ You are about to send {notification_type}{period_info} emails to {len(custom_recipients)} custom recipients")
         if cc_emails:
             st.info(f"CC: {', '.join(cc_emails)}")
-    elif selected_creators:
+    
+    elif recipient_type == "creators":
         if notification_type == "🚨 Critical Alerts":
             st.warning(f"⚠️ You are about to send CRITICAL ALERT emails to {len(selected_creators)} creators about overdue items")
         else:
@@ -787,14 +843,12 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
             status_text.text("Sending customs clearance schedule...")
             
             try:
-                # Get international POs
                 po_filters = {
                     'etd_from': datetime.now().date(),
                     'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                 }
                 intl_pos = data_loader.load_po_data_for_customs(po_filters)
                 
-                # Get international CANs
                 can_filters = {
                     'arrival_date_from': datetime.now().date(),
                     'arrival_date_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
@@ -840,9 +894,82 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                 })
             
             progress_bar.progress(1.0)
-            
-        elif custom_recipients:
-            # Send to custom recipients
+        
+        elif recipient_type == "vendors":
+            # Send to vendor contacts
+            if notification_type == "📅 PO Schedule":
+                vendor_contacts = st.session_state.selected_vendor_contacts
+                total_contacts = len(vendor_contacts)
+                
+                for idx, contact in enumerate(vendor_contacts):
+                    progress = (idx + 1) / total_contacts
+                    progress_bar.progress(progress)
+                    
+                    vendor_name = contact['vendor_name']
+                    vendor_email = contact['vendor_email']
+                    contact_name = contact['contact_name']
+                    
+                    status_text.text(f"Sending to {contact_name} at {vendor_name}... ({idx+1}/{total_contacts})")
+                    
+                    try:
+                        # Get all POs for this vendor (overdue + upcoming)
+                        po_df = data_loader.get_vendor_pos(vendor_name, weeks_ahead, include_overdue=True)
+                        
+                        if po_df is not None and not po_df.empty:
+                            # Count overdue and upcoming
+                            po_df['etd'] = pd.to_datetime(po_df['etd'])
+                            today = datetime.now().date()
+                            
+                            overdue_count = len(po_df[po_df['etd'].dt.date < today]['po_number'].unique())
+                            upcoming_count = len(po_df[po_df['etd'].dt.date >= today]['po_number'].unique())
+                            
+                            success, message = email_sender.send_vendor_po_schedule(
+                                vendor_email,
+                                vendor_name,
+                                po_df,
+                                cc_emails=cc_emails,
+                                weeks_ahead=weeks_ahead,
+                                include_overdue=True,
+                                contact_name=contact_name
+                            )
+                            
+                            results.append({
+                                'Vendor': vendor_name,
+                                'Contact': contact_name,
+                                'Email': vendor_email,
+                                'Status': '✅ Success' if success else '❌ Failed',
+                                'Total POs': po_df['po_number'].nunique(),
+                                'Overdue': overdue_count,
+                                'Upcoming': upcoming_count,
+                                'Message': message
+                            })
+                        else:
+                            results.append({
+                                'Vendor': vendor_name,
+                                'Contact': contact_name,
+                                'Email': vendor_email,
+                                'Status': '⚠️ Skipped',
+                                'Total POs': 0,
+                                'Overdue': 0,
+                                'Upcoming': 0,
+                                'Message': 'No POs found for this vendor'
+                            })
+                            
+                    except Exception as e:
+                        errors.append(f"Error for {contact_name} at {vendor_name}: {str(e)}")
+                        results.append({
+                            'Vendor': vendor_name,
+                            'Contact': contact_name,
+                            'Email': vendor_email,
+                            'Status': '❌ Error',
+                            'Total POs': 0,
+                            'Overdue': 0,
+                            'Upcoming': 0,
+                            'Message': str(e)
+                        })
+        
+        elif recipient_type == "custom":
+            # Send to custom recipients (existing logic)
             for idx, email in enumerate(custom_recipients):
                 progress = (idx + 1) / len(custom_recipients)
                 progress_bar.progress(progress)
@@ -883,7 +1010,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                                 'POs': 0,
                                 'Message': 'No POs found'
                             })
-                            
+                    
                     elif notification_type == "🚨 Critical Alerts":
                         overdue_pos = data_loader.get_overdue_pos()
                         pending_cans = data_loader.load_can_pending_data({'min_days_pending': 7})
@@ -923,7 +1050,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                                 'Alerts': 0,
                                 'Message': 'No critical items found'
                             })
-                            
+                    
                     elif notification_type == "📦 Pending Stock-in":
                         can_df = data_loader.load_can_pending_data()
                         
@@ -961,22 +1088,20 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                         'Items': 0,
                         'Message': str(e)
                     })
-                    
-        else:
-            # Send to selected creators
+        
+        else:  # creators
+            # Send to selected creators (existing logic)
             for idx, creator_name in enumerate(selected_creators):
                 progress = (idx + 1) / len(selected_creators)
                 progress_bar.progress(progress)
                 status_text.text(f"Sending to {creator_name}... ({idx+1}/{len(selected_creators)})")
                 
                 try:
-                    # Get creator info
                     creator_info = creators_df[creators_df['name'] == creator_name].iloc[0]
                     
-                    # Check if we should include CC based on selection mode
-                    current_cc_emails = cc_emails if selection_mode != "Custom Recipients" and include_cc else cc_emails
+                    # Include CC if enabled
+                    current_cc_emails = cc_emails if include_cc else cc_emails
                     
-                    # Get data based on notification type
                     if notification_type == "📅 PO Schedule":
                         filters = {
                             'created_by': creator_info['email'],
@@ -985,9 +1110,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                         }
                         po_df = data_loader.load_po_data(filters)
                         
-                        # Validate data before sending
                         if po_df is None:
-                            logger.error(f"load_po_data returned None for {creator_info['email']}")
                             results.append({
                                 'Creator': creator_name,
                                 'Email': creator_info['email'],
@@ -1022,7 +1145,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                             'POs': po_df['po_number'].nunique(),
                             'Message': message
                         })
-                            
+                    
                     elif notification_type == "🚨 Critical Alerts":
                         overdue_pos = data_loader.get_overdue_pos_by_creator(creator_info['email'])
                         pending_cans = data_loader.get_pending_cans_by_creator(creator_info['email'])
@@ -1062,7 +1185,7 @@ if ((notification_type == "🛃 Custom Clearance" or selected_creators or custom
                                 'Alerts': 0,
                                 'Message': 'No critical items found'
                             })
-                            
+                    
                     elif notification_type == "📦 Pending Stock-in":
                         can_df = data_loader.get_pending_cans_by_creator(creator_info['email'])
                         
@@ -1146,13 +1269,13 @@ with st.expander("ℹ️ Help & Information"):
        - Default is 4 weeks
     
     3. **Select Recipients**: 
-       - **All Creators**: Send to all PO creators
-       - **Selected Creators Only**: Choose specific creators
-       - **Custom Recipients**: Enter any email addresses manually
+       - **📝 PO Creators**: Send to PO creators
+       - **🏢 Vendors**: Send to vendor contacts (two-step selection)
+       - **✉️ Custom Recipients**: Enter any email addresses manually
        - For customs: Automatically sent to custom.clearance@prostech.vn
     
     4. **Configure CC Settings**: 
-       - Include managers in CC (automatic detection for creators)
+       - Include managers in CC for creators
        - Add additional CC recipients for any notification type
     
     5. **Preview**: Check the email content before sending
@@ -1162,6 +1285,7 @@ with st.expander("ℹ️ Help & Information"):
     
     #### 📅 PO Schedule:
     - For creators: POs they created for selected weeks
+    - For vendors: All their POs (overdue + upcoming)
     - For custom recipients: All POs for selected weeks
     - Grouped by week and vendor
     - Excel attachment with full details
@@ -1170,12 +1294,14 @@ with st.expander("ℹ️ Help & Information"):
     #### 🚨 Critical Alerts:
     - For creators: Their overdue POs and pending CANs
     - For custom recipients: All critical items
+    - Not available for vendors
     - Sorted by urgency
     - Clear action items
     
     #### 📦 Pending Stock-in:
     - For creators: CANs from their POs
     - For custom recipients: All pending CANs
+    - Not available for vendors
     - Categorized by days pending
     - Priority recommendations
     
@@ -1186,6 +1312,7 @@ with st.expander("ℹ️ Help & Information"):
     
     ### Notes:
     - Emails are sent from: inbound@prostech.vn
+    - Vendor selection is a two-step process: select vendors first, then their contacts
     - Custom recipients receive general overview (not filtered by creator)
     - All emails can include additional CC recipients
     - Only pending items (not completed) are included
