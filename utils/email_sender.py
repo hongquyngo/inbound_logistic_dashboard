@@ -2263,7 +2263,7 @@ class InboundEmailSender:
             
             <div class="content">
                 <p>{greeting}</p>
-                <p>Please find below the status of your purchase orders with our company.</p>
+                <p>Please find below the status of our purchase orders with our company.</p>
                 
                 <div class="summary-section">
                     <h3>📊 Summary</h3>
