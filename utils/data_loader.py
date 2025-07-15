@@ -1126,7 +1126,59 @@ class InboundDataLoader:
                     'total_countries': 0,
                     'total_value': 0
                 }
+                
+    def pivot_po_data(self, df, period='weekly', date_type='etd'):
+        """Pivot PO data by period"""
+        try:
+            if df.empty:
+                return pd.DataFrame()
             
-
+            # Select date column based on date_type
+            date_col = {
+                'po_date': 'po_date',
+                'etd': 'etd', 
+                'eta': 'eta'
+            }.get(date_type.replace(' ', '_').lower(), 'etd')
+            
+            # Ensure date column is datetime
+            df[date_col] = pd.to_datetime(df[date_col])
+            
+            # Create period column
+            if period == 'daily':
+                df['period'] = df[date_col].dt.date
+                period_format = '%Y-%m-%d'
+            elif period == 'weekly':
+                df['period'] = df[date_col].dt.to_period('W').dt.start_time
+                period_format = 'Week of %Y-%m-%d'
+            else:  # monthly
+                df['period'] = df[date_col].dt.to_period('M').dt.start_time
+                period_format = '%B %Y'
+            
+            # Group by period and aggregate
+            pivot_df = df.groupby(['period', 'vendor_name', 'vendor_type', 'vendor_location_type']).agg({
+                'po_number': 'nunique',
+                'po_line_id': 'count',
+                'standard_quantity': 'sum',
+                'pending_standard_arrival_quantity': 'sum',
+                'total_amount_usd': 'sum',
+                'outstanding_arrival_amount_usd': 'sum',
+                'arrival_completion_percent': 'mean'
+            }).reset_index()
+            
+            pivot_df.columns = ['Period', 'Vendor', 'Type', 'Location', 'PO Count', 'Line Items', 
+                            'Total Quantity', 'Pending Quantity', 'Total Value USD', 
+                            'Outstanding USD', 'Avg Completion %']
+            
+            # Format period
+            pivot_df['Period'] = pd.to_datetime(pivot_df['Period']).dt.strftime(period_format)
+            
+            # Sort by period and vendor
+            pivot_df = pivot_df.sort_values(['Period', 'Outstanding USD'], ascending=[True, False])
+            
+            return pivot_df
+            
+        except Exception as e:
+            logger.error(f"Error pivoting PO data: {e}")
+            return pd.DataFrame()
         
-
+        

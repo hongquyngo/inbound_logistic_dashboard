@@ -46,7 +46,7 @@ with st.expander("🔍 Filters", expanded=True):
             min_value=datetime.now().date() - timedelta(days=365),
             max_value=datetime.now().date() + timedelta(days=365)
         )
-    
+
     # Get filter options
     filter_options = data_loader.get_filter_options()
     
@@ -213,7 +213,7 @@ if po_df is not None and not po_df.empty:
         st.metric("Avg Completion", f"{avg_completion:.1f}%")
     
     # Create tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Summary View", "📈 Analytics", "📋 Detailed List", "💰 Financial View"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Summary View", "📅 Pivot View", "📈 Analytics", "📋 Detailed List", "💰 Financial View"])
     
     with tab1:
         # Summary by vendor
@@ -233,7 +233,7 @@ if po_df is not None and not po_df.empty:
         vendor_summary = vendor_summary.sort_values('Outstanding', ascending=False)
         
         # Add vendor type indicators
-        vendor_summary['Type'] = vendor_summary['Category'] + ' - ' + vendor_summary['Location']
+        # vendor_summary['Type'] = vendor_summary['Category'] + ' - ' + vendor_summary['Location']
         
         # Format currency columns
         for col in ['Total Value', 'Outstanding']:
@@ -254,6 +254,167 @@ if po_df is not None and not po_df.empty:
         )
     
     with tab2:
+        # Pivot View
+        st.subheader(f"📅 PO Schedule - Pivot View")
+        
+        # View period selector - đặt trong tab
+        col1, col2, col3 = st.columns([2, 2, 3])
+
+        with col1:
+            view_period = st.radio(
+                "View Period:",
+                options=["daily", "weekly", "monthly"],
+                index=1,
+                horizontal=True
+            )
+        with col2:
+            group_by_vendor = st.checkbox("Group by Vendor", value=False)
+        with col3:
+            show_intl_only = st.checkbox("International Vendors Only", value=False)
+
+        
+        # Get date type from main filter
+        date_type_lower = date_type.lower().replace(' ', '_')  # Convert "PO Date" to "po_date"
+        
+        # Filter data if needed
+        pivot_data = po_df.copy()
+        if show_intl_only:
+            pivot_data = pivot_data[pivot_data['vendor_location_type'] == 'International']
+        
+        # Get pivoted data
+        pivot_df = data_loader.pivot_po_data(pivot_data, view_period, date_type_lower)
+        
+        if not pivot_df.empty:
+            st.markdown(f"**Showing {view_period} view based on {date_type}**")
+            
+            if group_by_vendor:
+                # Create pivot table grouped by vendor
+                pivot_table = pivot_df.pivot_table(
+                    index='Vendor',
+                    columns='Period',
+                    values=['Total Quantity', 'Pending Quantity', 'Outstanding USD'],
+                    aggfunc='sum',
+                    fill_value=0
+                )
+                
+                # Display options
+                value_type = st.selectbox(
+                    "Select Metric to Display",
+                    options=['Total Quantity', 'Pending Quantity', 'Outstanding USD'],
+                    index=2
+                )
+                
+                # Display selected value type
+                display_table = pivot_table[value_type]
+                
+                # Format based on value type
+                if 'USD' in value_type:
+                    st.dataframe(
+                        display_table.style.format("${:,.0f}").background_gradient(cmap='Blues'),
+                        use_container_width=True,
+                        height=600
+                    )
+                else:
+                    st.dataframe(
+                        display_table.style.format("{:,.0f}").background_gradient(cmap='Greens'),
+                        use_container_width=True,
+                        height=600
+                    )
+                    
+                # Show totals
+                st.markdown("#### Period Totals")
+                period_totals = pivot_df.groupby('Period').agg({
+                    'Total Quantity': 'sum',
+                    'Pending Quantity': 'sum',
+                    'Outstanding USD': 'sum',
+                    'PO Count': 'sum',
+                    'Line Items': 'sum'
+                }).reset_index()
+                
+                st.dataframe(
+                    period_totals.style.format({
+                        'Total Quantity': '{:,.0f}',
+                        'Pending Quantity': '{:,.0f}',
+                        'Outstanding USD': '${:,.0f}',
+                        'PO Count': '{:,.0f}',
+                        'Line Items': '{:,.0f}'
+                    }),
+                    use_container_width=True
+                )
+            else:
+                # Display regular pivot view
+                # Format currency columns
+                format_dict = {
+                    'PO Count': '{:,.0f}',
+                    'Line Items': '{:,.0f}',
+                    'Total Quantity': '{:,.0f}',
+                    'Pending Quantity': '{:,.0f}',
+                    'Total Value USD': '${:,.0f}',
+                    'Outstanding USD': '${:,.0f}',
+                    'Avg Completion %': '{:.1f}%'
+                }
+                
+                # Apply conditional formatting
+                def highlight_vendor_location(row):
+                    if row['Location'] == 'International':
+                        return ['background-color: #ffe4b5'] * len(row)
+                    return [''] * len(row)
+                
+                def highlight_completion(val):
+                    if pd.isna(val):
+                        return ''
+                    if val < 50:
+                        return 'color: red; font-weight: bold'
+                    elif val < 80:
+                        return 'color: orange'
+                    return 'color: green'
+                
+                styled_df = pivot_df.style.format(format_dict)
+                styled_df = styled_df.apply(highlight_vendor_location, axis=1)
+                styled_df = styled_df.applymap(highlight_completion, subset=['Avg Completion %'])
+                styled_df = styled_df.background_gradient(subset=['Outstanding USD'], cmap='Reds')
+                
+                st.dataframe(styled_df, use_container_width=True, height=600)
+            
+            # Summary metrics for pivot
+            st.markdown("---")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                total_periods = pivot_df['Period'].nunique()
+                st.metric("Total Periods", f"{total_periods}")
+            
+            with col2:
+                total_vendors = pivot_df['Vendor'].nunique()
+                st.metric("Active Vendors", f"{total_vendors}")
+            
+            with col3:
+                intl_vendors = pivot_df[pivot_df['Location'] == 'International']['Vendor'].nunique()
+                st.metric("International", f"{intl_vendors}")
+            
+            with col4:
+                if pivot_df['Total Quantity'].sum() > 0:
+                    avg_pending = pivot_df['Pending Quantity'].sum() / pivot_df['Total Quantity'].sum() * 100
+                else:
+                    avg_pending = 0
+                st.metric("Avg Pending %", f"{avg_pending:.1f}%")
+            
+            with col5:
+                total_outstanding = pivot_df['Outstanding USD'].sum()
+                st.metric("Total Outstanding", f"${total_outstanding/1000000:.1f}M")
+            
+            # Download button
+            csv = pivot_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Pivot View",
+                data=csv,
+                file_name=f"po_pivot_{date_type_lower}_{view_period}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime='text/csv'
+            )
+        else:
+            st.info(f"No data available for {view_period} pivot view")
+
+    with tab3:
         # Analytics
         col1, col2 = st.columns(2)
         
@@ -493,7 +654,7 @@ if po_df is not None and not po_df.empty:
         else:
             st.info("No demand data available for analysis")
     
-    with tab3:
+    with tab4:
         # Detailed list
         st.subheader("📋 Detailed PO List")
         
@@ -553,7 +714,7 @@ if po_df is not None and not po_df.empty:
                 mime='text/csv'
             )
     
-    with tab4:
+    with tab5:
         # Financial view
         st.subheader("💰 Financial Analysis")
         
