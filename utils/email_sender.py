@@ -886,9 +886,9 @@ class InboundEmailSender:
                     <p style="margin-bottom: 0;">Import the attached .ics file to receive alerts about these critical issues.</p>
                 </div>
                 
-                <p><strong>Procurement Team Contact:</strong><br>
-                📧 Email: procurement@prostech.vn<br>
-                📞 Phone: +84 33 476273</p>
+                <p><strong>Inbound Team Contact:</strong><br>
+                📧 Email: Inbound@prostech.vn<br>
+                📞 Phone: +84 34 3088826</p>
             </div>
             
             <div class="footer">

@@ -96,15 +96,20 @@ def get_creators_overdue():
                 e.keycloak_id,
                 CONCAT(e.first_name, ' ', e.last_name) as name,
                 e.email,
+                e.manager_id,
+                m.email as manager_email,
+                CONCAT(m.first_name, ' ', m.last_name) as manager_name,
                 COUNT(DISTINCT po.po_number) as overdue_pos,
                 SUM(po.outstanding_arrival_amount_usd) as overdue_value,
                 MAX(DATEDIFF(CURDATE(), po.etd)) as max_days_overdue
             FROM employees e
+            LEFT JOIN employees m ON e.manager_id = m.id
             INNER JOIN purchase_order_full_view po ON po.created_by = e.email
             WHERE po.etd < CURDATE()
                 AND po.status NOT IN ('COMPLETED')
                 AND po.pending_standard_arrival_quantity > 0
-            GROUP BY e.id, e.keycloak_id, e.first_name, e.last_name, e.email
+            GROUP BY e.id, e.keycloak_id, e.first_name, e.last_name, e.email,
+                     e.manager_id, m.email, m.first_name, m.last_name
         ),
         pending_cans AS (
             SELECT 
