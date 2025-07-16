@@ -244,7 +244,7 @@ with col2:
             "📆 Date Type",
             ["ETD", "ETA"],
             index=0 if st.session_state.date_type == "ETD" else 1,
-            help="ETD: Estimated Time of Departure | ETA: Estimated Time of Arrival",
+            help="ETD: Estimated Time of Delivery | ETA: Estimated Time of Arrival",
             horizontal=True
         )
         st.session_state.date_type = date_type
