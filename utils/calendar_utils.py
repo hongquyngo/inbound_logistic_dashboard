@@ -13,8 +13,8 @@ class InboundCalendarGenerator:
     """Generate iCalendar (.ics) files for inbound logistics schedules"""
     
     @staticmethod
-    def create_po_schedule_ics(po_df, organizer_email):
-        """Create ICS content for PO arrival schedule"""
+    def create_po_schedule_ics(po_df, organizer_email, date_type='etd'):
+        """Create ICS content for PO arrival schedule based on ETD or ETA"""
         try:
             # ICS header
             ics_content = """BEGIN:VCALENDAR
@@ -29,12 +29,20 @@ METHOD:REQUEST
                 ics_content += "END:VCALENDAR"
                 return ics_content
             
-            # Group POs by ETD date
-            po_df['etd'] = pd.to_datetime(po_df['etd'])
-            grouped = po_df.groupby(po_df['etd'].dt.date)
+            # Ensure date column exists
+            if date_type not in po_df.columns:
+                logger.warning(f"Date column '{date_type}' not found in DataFrame")
+                ics_content += "END:VCALENDAR"
+                return ics_content
             
-            # Create events for each ETD date
-            for etd_date, date_df in grouped:
+            # Group POs by date
+            po_df[date_type] = pd.to_datetime(po_df[date_type])
+            grouped = po_df.groupby(po_df[date_type].dt.date)
+            
+            date_type_upper = date_type.upper()
+            
+            # Create events for each date
+            for date_value, date_df in grouped:
                 # Generate unique ID
                 uid = str(uuid.uuid4())
                 
@@ -43,7 +51,7 @@ METHOD:REQUEST
                 
                 # Set event time: 9:00 AM - 5:00 PM local time
                 # Convert to UTC (assuming Vietnam timezone GMT+7)
-                start_datetime = datetime.combine(etd_date, datetime.min.time()).replace(hour=9, minute=0) - timedelta(hours=7)
+                start_datetime = datetime.combine(date_value, datetime.min.time()).replace(hour=9, minute=0) - timedelta(hours=7)
                 end_datetime = start_datetime + timedelta(hours=8)
                 
                 # Format for ICS
@@ -56,18 +64,18 @@ METHOD:REQUEST
                 total_value = date_df['outstanding_arrival_amount_usd'].sum()
                 
                 # Check for overdue items
-                is_overdue = etd_date < datetime.now().date()
+                is_overdue = date_value < datetime.now().date()
                 status_indicator = " ⚠️ OVERDUE" if is_overdue else ""
                 
-                summary = f"📦 PO Arrivals ({po_count}){status_indicator} - {etd_date.strftime('%b %d')}"
+                summary = f"📦 PO Arrivals ({po_count}){status_indicator} - {date_value.strftime('%b %d')} ({date_type_upper})"
                 
-                description = f"Purchase Order Arrivals for {etd_date.strftime('%B %d, %Y')}\\n\\n"
+                description = f"Purchase Order Arrivals for {date_value.strftime('%B %d, %Y')} based on {date_type_upper}\\n\\n"
                 description += f"Total POs: {po_count}\\n"
                 description += f"Vendors: {vendor_count}\\n"
                 description += f"Total Value: ${total_value:,.0f}\\n"
                 
                 if is_overdue:
-                    days_overdue = (datetime.now().date() - etd_date).days
+                    days_overdue = (datetime.now().date() - date_value).days
                     description += f"\\n⚠️ OVERDUE by {days_overdue} days!\\n"
                 
                 description += "\\nPURCHASE ORDERS:\\n"
@@ -84,7 +92,7 @@ METHOD:REQUEST
                 
                 # Add checklist
                 description += "\\n📋 CHECKLIST:\\n"
-                description += "- Confirm arrival with vendor\\n"
+                description += f"- Confirm arrival with vendor ({date_type_upper} based)\\n"
                 description += "- Prepare warehouse space\\n"
                 description += "- Arrange QC inspection\\n"
                 description += "- Prepare import documents\\n"
@@ -223,7 +231,7 @@ PRODID:-//Inbound Logistics//Stock-in Reminder//EN
 END:VCALENDAR"""
     
     @staticmethod
-    def create_critical_alerts_ics(overdue_pos, pending_cans, organizer_email):
+    def create_critical_alerts_ics(overdue_pos, pending_cans, organizer_email, date_type='etd'):
         """Create ICS content for critical alerts with multiple urgent reminders"""
         try:
             # ICS header
@@ -252,21 +260,22 @@ METHOD:REQUEST
             pending_count = len(pending_cans) if pending_cans is not None and not pending_cans.empty else 0
             max_days_overdue = overdue_pos['days_overdue'].max() if overdue_pos is not None and not overdue_pos.empty and 'days_overdue' in overdue_pos.columns else 0
             
-            summary = f"🚨 CRITICAL: {overdue_count} Overdue POs, {pending_count} Pending CANs"
+            date_type_upper = date_type.upper()
+            summary = f"🚨 CRITICAL: {overdue_count} Overdue POs ({date_type_upper}), {pending_count} Pending CANs"
             
             description = f"CRITICAL ISSUES REQUIRING IMMEDIATE ACTION\\n\\n"
-            description += f"Overdue POs: {overdue_count}\\n"
+            description += f"Overdue POs (by {date_type_upper}): {overdue_count}\\n"
             description += f"Max Days Overdue: {max_days_overdue}\\n"
             description += f"Pending CANs > 7 days: {pending_count}\\n\\n"
             
             # List top overdue POs
             if overdue_pos is not None and not overdue_pos.empty:
-                description += "TOP OVERDUE POs:\\n"
+                description += f"TOP OVERDUE POs ({date_type_upper}):\\n"
                 for _, po in overdue_pos.nlargest(5, 'days_overdue').iterrows():
                     description += f"• PO #{po['po_number']} - {po['vendor_name']} ({po['days_overdue']} days)\\n"
             
             description += "\\n📋 URGENT ACTIONS:\\n"
-            description += "- Contact vendors for overdue POs\\n"
+            description += f"- Contact vendors for overdue POs ({date_type_upper} based)\\n"
             description += "- Expedite pending stock-in items\\n"
             description += "- Escalate to management if needed\\n"
             
@@ -287,7 +296,7 @@ TRANSP:BUSY
 BEGIN:VALARM
 TRIGGER:-PT30M
 ACTION:DISPLAY
-DESCRIPTION:CRITICAL: {overdue_count} overdue POs need immediate attention!
+DESCRIPTION:CRITICAL: {overdue_count} overdue POs ({date_type_upper}) need immediate attention!
 END:VALARM
 BEGIN:VALARM
 TRIGGER:-PT5M
@@ -309,7 +318,7 @@ PRODID:-//Inbound Logistics//Critical Alerts//EN
 END:VCALENDAR"""
     
     @staticmethod
-    def create_customs_clearance_ics(po_df, can_df, organizer_email, weeks_ahead=4):
+    def create_customs_clearance_ics(po_df, can_df, organizer_email, weeks_ahead=4, date_type='etd'):
         """Create ICS content for customs clearance schedule"""
         try:
             # ICS header
@@ -320,23 +329,25 @@ CALSCALE:GREGORIAN
 METHOD:REQUEST
 """
             
-            # Process POs by ETD
+            date_type_upper = date_type.upper()
+            
+            # Process POs by date
             if po_df is not None and not po_df.empty:
-                po_df['etd'] = pd.to_datetime(po_df['etd'])
+                po_df[date_type] = pd.to_datetime(po_df[date_type])
                 
-                # Group by ETD and country
-                grouped_po = po_df.groupby([po_df['etd'].dt.date, 'vendor_country_name'])
+                # Group by date and country
+                grouped_po = po_df.groupby([po_df[date_type].dt.date, 'vendor_country_name'])
                 
-                for (etd_date, country), group_df in grouped_po:
+                for (date_value, country), group_df in grouped_po:
                     # Skip if not within weeks ahead
-                    if etd_date > datetime.now().date() + timedelta(weeks=weeks_ahead):
+                    if date_value > datetime.now().date() + timedelta(weeks=weeks_ahead):
                         continue
                         
                     uid = str(uuid.uuid4())
                     now = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
                     
                     # Set event time: 8:00 AM - 12:00 PM for customs
-                    start_datetime = datetime.combine(etd_date, datetime.min.time()).replace(hour=8, minute=0) - timedelta(hours=7)
+                    start_datetime = datetime.combine(date_value, datetime.min.time()).replace(hour=8, minute=0) - timedelta(hours=7)
                     end_datetime = start_datetime + timedelta(hours=4)
                     
                     dtstart = start_datetime.strftime('%Y%m%dT%H%M%SZ')
@@ -345,10 +356,10 @@ METHOD:REQUEST
                     po_count = group_df['po_number'].nunique()
                     total_value = group_df['outstanding_arrival_amount_usd'].sum()
                     
-                    summary = f"🛃 Customs: {po_count} POs from {country} - {etd_date.strftime('%b %d')}"
+                    summary = f"🛃 Customs: {po_count} POs from {country} - {date_value.strftime('%b %d')} ({date_type_upper})"
                     
                     description = f"CUSTOMS CLEARANCE - {country}\\n"
-                    description += f"ETD: {etd_date.strftime('%B %d, %Y')}\\n\\n"
+                    description += f"{date_type_upper}: {date_value.strftime('%B %d, %Y')}\\n\\n"
                     description += f"Total POs: {po_count}\\n"
                     description += f"Total Value: ${total_value:,.0f}\\n\\n"
                     
@@ -378,7 +389,7 @@ TRANSP:BUSY
 BEGIN:VALARM
 TRIGGER:-P1D
 ACTION:DISPLAY
-DESCRIPTION:Customs clearance preparation for {country} shipments
+DESCRIPTION:Customs clearance preparation for {country} shipments ({date_type_upper})
 END:VALARM
 END:VEVENT
 """
@@ -451,7 +462,7 @@ PRODID:-//Inbound Logistics//Customs Clearance//EN
 END:VCALENDAR"""
     
     @staticmethod
-    def create_google_calendar_links(po_df):
+    def create_google_calendar_links(po_df, date_type='etd'):
         """Create Google Calendar event links for PO arrivals"""
         links = []
         
@@ -462,26 +473,27 @@ END:VCALENDAR"""
                 return []
             
             # Check for required columns
-            required_cols = ['etd', 'po_number', 'vendor_name', 'outstanding_arrival_amount_usd']
+            required_cols = [date_type, 'po_number', 'vendor_name', 'outstanding_arrival_amount_usd']
             missing_cols = [col for col in required_cols if col not in po_df.columns]
             if missing_cols:
                 logger.error(f"Missing required columns: {missing_cols}")
                 return []
             
-            # Group by ETD date
-            po_df['etd'] = pd.to_datetime(po_df['etd'], errors='coerce')
-            po_df = po_df.dropna(subset=['etd'])  # Remove invalid dates
+            # Group by date
+            po_df[date_type] = pd.to_datetime(po_df[date_type], errors='coerce')
+            po_df = po_df.dropna(subset=[date_type])  # Remove invalid dates
             
             if po_df.empty:
-                logger.warning("No valid ETD dates found")
+                logger.warning("No valid dates found")
                 return []
             
-            grouped = po_df.groupby(po_df['etd'].dt.date)
+            grouped = po_df.groupby(po_df[date_type].dt.date)
+            date_type_upper = date_type.upper()
             
-            for etd_date, date_df in grouped:
+            for date_value, date_df in grouped:
                 # Format date and time for Google Calendar (Vietnam timezone)
                 # Start: 9:00 AM, End: 5:00 PM
-                start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=9, minute=0)
+                start_dt = datetime.combine(date_value, datetime.min.time()).replace(hour=9, minute=0)
                 end_dt = start_dt.replace(hour=17, minute=0)
                 
                 # Format: YYYYMMDDTHHmmSS/YYYYMMDDTHHmmSS
@@ -492,21 +504,21 @@ END:VCALENDAR"""
                 vendor_count = date_df['vendor_name'].nunique()
                 total_value = date_df['outstanding_arrival_amount_usd'].sum()
                 
-                is_overdue = etd_date < datetime.now().date()
+                is_overdue = date_value < datetime.now().date()
                 status_indicator = " ⚠️ OVERDUE" if is_overdue else ""
                 
-                title = f"📦 PO Arrivals ({po_count}){status_indicator} - {etd_date.strftime('%b %d')}"
+                title = f"📦 PO Arrivals ({po_count}){status_indicator} - {date_value.strftime('%b %d')} ({date_type_upper})"
                 
-                details = f"Purchase Order Arrivals for {etd_date.strftime('%B %d, %Y')}\n\n"
+                details = f"Purchase Order Arrivals for {date_value.strftime('%B %d, %Y')} based on {date_type_upper}\n\n"
                 details += f"Total POs: {po_count}\n"
                 details += f"Vendors: {vendor_count}\n"
                 details += f"Total Value: ${total_value:,.0f}\n"
                 
                 if is_overdue:
-                    days_overdue = (datetime.now().date() - etd_date).days
+                    days_overdue = (datetime.now().date() - date_value).days
                     details += f"\n⚠️ OVERDUE by {days_overdue} days!\n"
                 
-                details += "\nPURCHASE ORDERS:\n"
+                details += f"\nPURCHASE ORDERS ({date_type_upper} based):\n"
                 
                 # List top POs
                 for _, po in date_df.head(5).iterrows():
@@ -537,7 +549,7 @@ END:VCALENDAR"""
                 link = f"{base_url}?{urllib.parse.urlencode(params)}"
                 
                 links.append({
-                    'date': etd_date,
+                    'date': date_value,
                     'link': link,
                     'count': po_count,
                     'is_urgent': is_overdue
@@ -550,23 +562,25 @@ END:VCALENDAR"""
             return []
     
     @staticmethod
-    def create_customs_google_calendar_links(po_df, can_df=None):
+    def create_customs_google_calendar_links(po_df, can_df=None, date_type='etd'):
         """Create Google Calendar links for customs clearance events"""
         links = []
         
         try:
+            date_type_upper = date_type.upper()
+            
             # Process POs
             if po_df is not None and not po_df.empty:
-                po_df['etd'] = pd.to_datetime(po_df['etd'], errors='coerce')
-                po_df = po_df.dropna(subset=['etd'])
+                po_df[date_type] = pd.to_datetime(po_df[date_type], errors='coerce')
+                po_df = po_df.dropna(subset=[date_type])
                 
                 if 'vendor_country_name' in po_df.columns:
-                    # Group by ETD and country for better organization
-                    grouped = po_df.groupby([po_df['etd'].dt.date, 'vendor_country_name'])
+                    # Group by date and country for better organization
+                    grouped = po_df.groupby([po_df[date_type].dt.date, 'vendor_country_name'])
                     
-                    for (etd_date, country), group_df in grouped:
+                    for (date_value, country), group_df in grouped:
                         # Format date and time
-                        start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=8, minute=0)
+                        start_dt = datetime.combine(date_value, datetime.min.time()).replace(hour=8, minute=0)
                         end_dt = start_dt.replace(hour=12, minute=0)
                         
                         dates = f"{start_dt.strftime('%Y%m%dT%H%M%S')}/{end_dt.strftime('%Y%m%dT%H%M%S')}"
@@ -574,10 +588,10 @@ END:VCALENDAR"""
                         po_count = group_df['po_number'].nunique()
                         total_value = group_df['outstanding_arrival_amount_usd'].sum()
                         
-                        title = f"🛃 Customs: {po_count} POs from {country}"
+                        title = f"🛃 Customs: {po_count} POs from {country} ({date_type_upper})"
                         
                         details = f"CUSTOMS CLEARANCE - {country}\n"
-                        details += f"ETD: {etd_date.strftime('%B %d, %Y')}\n\n"
+                        details += f"{date_type_upper}: {date_value.strftime('%B %d, %Y')}\n\n"
                         details += f"Total POs: {po_count}\n"
                         details += f"Total Value: ${total_value:,.0f}\n\n"
                         details += "REQUIRED DOCUMENTS:\n"
@@ -599,7 +613,7 @@ END:VCALENDAR"""
                         link = f"{base_url}?{urllib.parse.urlencode(params)}"
                         
                         links.append({
-                            'date': etd_date,
+                            'date': date_value,
                             'country': country,
                             'link': link,
                             'count': po_count,
@@ -661,7 +675,7 @@ END:VCALENDAR"""
             return []
     
     @staticmethod
-    def create_outlook_calendar_links(po_df):
+    def create_outlook_calendar_links(po_df, date_type='etd'):
         """Create Outlook/Office 365 calendar event links for PO arrivals"""
         links = []
         
@@ -672,26 +686,27 @@ END:VCALENDAR"""
                 return []
             
             # Check for required columns
-            required_cols = ['etd', 'po_number', 'vendor_name', 'outstanding_arrival_amount_usd']
+            required_cols = [date_type, 'po_number', 'vendor_name', 'outstanding_arrival_amount_usd']
             missing_cols = [col for col in required_cols if col not in po_df.columns]
             if missing_cols:
                 logger.error(f"Missing required columns: {missing_cols}")
                 return []
             
-            # Group by ETD date
-            po_df['etd'] = pd.to_datetime(po_df['etd'], errors='coerce')
-            po_df = po_df.dropna(subset=['etd'])
+            # Group by date
+            po_df[date_type] = pd.to_datetime(po_df[date_type], errors='coerce')
+            po_df = po_df.dropna(subset=[date_type])
             
             if po_df.empty:
-                logger.warning("No valid ETD dates found")
+                logger.warning("No valid dates found")
                 return []
             
-            grouped = po_df.groupby(po_df['etd'].dt.date)
+            grouped = po_df.groupby(po_df[date_type].dt.date)
+            date_type_upper = date_type.upper()
             
-            for etd_date, date_df in grouped:
+            for date_value, date_df in grouped:
                 # Format date and time for Outlook
                 # Start: 9:00 AM, End: 5:00 PM
-                start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=9, minute=0)
+                start_dt = datetime.combine(date_value, datetime.min.time()).replace(hour=9, minute=0)
                 end_dt = start_dt.replace(hour=17, minute=0)
                 
                 # Format for Outlook (ISO format)
@@ -703,21 +718,21 @@ END:VCALENDAR"""
                 vendor_count = date_df['vendor_name'].nunique()
                 total_value = date_df['outstanding_arrival_amount_usd'].sum()
                 
-                is_overdue = etd_date < datetime.now().date()
+                is_overdue = date_value < datetime.now().date()
                 status_indicator = " ⚠️ OVERDUE" if is_overdue else ""
                 
-                subject = f"📦 PO Arrivals ({po_count}){status_indicator} - {etd_date.strftime('%b %d')}"
+                subject = f"📦 PO Arrivals ({po_count}){status_indicator} - {date_value.strftime('%b %d')} ({date_type_upper})"
                 
-                body = f"Purchase Order Arrivals for {etd_date.strftime('%B %d, %Y')}<br><br>"
+                body = f"Purchase Order Arrivals for {date_value.strftime('%B %d, %Y')} based on {date_type_upper}<br><br>"
                 body += f"Total POs: {po_count}<br>"
                 body += f"Vendors: {vendor_count}<br>"
                 body += f"Total Value: ${total_value:,.0f}<br>"
                 
                 if is_overdue:
-                    days_overdue = (datetime.now().date() - etd_date).days
+                    days_overdue = (datetime.now().date() - date_value).days
                     body += f"<br><strong style='color:red'>⚠️ OVERDUE by {days_overdue} days!</strong><br>"
                 
-                body += "<br>PURCHASE ORDERS:<br>"
+                body += f"<br>PURCHASE ORDERS ({date_type_upper} based):<br>"
                 
                 # List top POs
                 for _, po in date_df.head(5).iterrows():
@@ -747,7 +762,7 @@ END:VCALENDAR"""
                 link = f"{base_url}?{urllib.parse.urlencode(params)}"
                 
                 links.append({
-                    'date': etd_date,
+                    'date': date_value,
                     'link': link,
                     'count': po_count,
                     'is_urgent': is_overdue
@@ -760,21 +775,23 @@ END:VCALENDAR"""
             return []
     
     @staticmethod
-    def create_customs_outlook_calendar_links(po_df, can_df=None):
+    def create_customs_outlook_calendar_links(po_df, can_df=None, date_type='etd'):
         """Create Outlook Calendar links for customs clearance events"""
         links = []
         
         try:
+            date_type_upper = date_type.upper()
+            
             # Process POs
             if po_df is not None and not po_df.empty:
-                po_df['etd'] = pd.to_datetime(po_df['etd'], errors='coerce')
-                po_df = po_df.dropna(subset=['etd'])
+                po_df[date_type] = pd.to_datetime(po_df[date_type], errors='coerce')
+                po_df = po_df.dropna(subset=[date_type])
                 
                 if 'vendor_country_name' in po_df.columns:
-                    grouped = po_df.groupby([po_df['etd'].dt.date, 'vendor_country_name'])
+                    grouped = po_df.groupby([po_df[date_type].dt.date, 'vendor_country_name'])
                     
-                    for (etd_date, country), group_df in grouped:
-                        start_dt = datetime.combine(etd_date, datetime.min.time()).replace(hour=8, minute=0)
+                    for (date_value, country), group_df in grouped:
+                        start_dt = datetime.combine(date_value, datetime.min.time()).replace(hour=8, minute=0)
                         end_dt = start_dt.replace(hour=12, minute=0)
                         
                         startdt = start_dt.strftime('%Y-%m-%dT%H:%M:%S')
@@ -783,10 +800,10 @@ END:VCALENDAR"""
                         po_count = group_df['po_number'].nunique()
                         total_value = group_df['outstanding_arrival_amount_usd'].sum()
                         
-                        subject = f"🛃 Customs: {po_count} POs from {country}"
+                        subject = f"🛃 Customs: {po_count} POs from {country} ({date_type_upper})"
                         
                         body = f"<h3>CUSTOMS CLEARANCE - {country}</h3>"
-                        body += f"<p><strong>ETD:</strong> {etd_date.strftime('%B %d, %Y')}</p>"
+                        body += f"<p><strong>{date_type_upper}:</strong> {date_value.strftime('%B %d, %Y')}</p>"
                         body += f"<p><strong>Total POs:</strong> {po_count}<br>"
                         body += f"<strong>Total Value:</strong> ${total_value:,.0f}</p>"
                         body += "<h4>REQUIRED DOCUMENTS:</h4>"
@@ -809,7 +826,7 @@ END:VCALENDAR"""
                         link = f"{base_url}?{urllib.parse.urlencode(params)}"
                         
                         links.append({
-                            'date': etd_date,
+                            'date': date_value,
                             'country': country,
                             'link': link,
                             'count': po_count,

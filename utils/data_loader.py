@@ -128,6 +128,14 @@ class InboundDataLoader:
                     query += " AND etd <= :etd_to"
                     params['etd_to'] = filters['etd_to']
                 
+                if filters.get('eta_from'):
+                    query += " AND eta >= :eta_from"
+                    params['eta_from'] = filters['eta_from']
+                
+                if filters.get('eta_to'):
+                    query += " AND eta <= :eta_to"
+                    params['eta_to'] = filters['eta_to']
+                
                 if filters.get('created_by'):
                     query += " AND created_by = :created_by"
                     params['created_by'] = filters['created_by']
@@ -163,7 +171,9 @@ class InboundDataLoader:
                 
                 # Special filters
                 if filters.get('overdue_only'):
-                    query += " AND etd < CURDATE() AND status != 'COMPLETED'"
+                    # Check based on date_type if provided
+                    date_column = filters.get('date_type', 'etd')
+                    query += f" AND {date_column} < CURDATE() AND status != 'COMPLETED'"
                 
                 if filters.get('over_delivered_only'):
                     query += " AND is_over_delivered = 'Y'"
@@ -455,7 +465,8 @@ class InboundDataLoader:
                 vendor_location_type,
                 COUNT(DISTINCT po_number) as active_pos,
                 SUM(outstanding_arrival_amount_usd) as outstanding_value,
-                MIN(etd) as next_etd
+                MIN(etd) as next_etd,
+                MIN(eta) as next_eta
             FROM purchase_order_full_view
             WHERE status NOT IN ('COMPLETED', 'CANCELLED')
             GROUP BY vendor_name, vendor_type, vendor_location_type
@@ -471,10 +482,13 @@ class InboundDataLoader:
             logger.error(f"Error getting vendor list: {e}")
             return pd.DataFrame()
     
-    def get_overdue_pos(self):
-        """Get overdue purchase orders"""
+    def get_overdue_pos(self, date_type='etd'):
+        """Get overdue purchase orders based on ETD or ETA"""
         try:
-            query = text("""
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = text(f"""
             SELECT 
                 po_number,
                 vendor_name,
@@ -482,11 +496,11 @@ class InboundDataLoader:
                 COUNT(DISTINCT po_line_id) as line_items,
                 SUM(pending_standard_arrival_quantity) as pending_qty,
                 SUM(outstanding_arrival_amount_usd) as outstanding_value,
-                MIN(etd) as original_etd,
-                DATEDIFF(CURDATE(), MIN(etd)) as days_overdue,
+                MIN({date_column}) as original_{date_column},
+                DATEDIFF(CURDATE(), MIN({date_column})) as days_overdue,
                 GROUP_CONCAT(DISTINCT pt_code SEPARATOR ', ') as products
             FROM purchase_order_full_view
-            WHERE etd < CURDATE()
+            WHERE {date_column} < CURDATE()
                 AND status NOT IN ('COMPLETED', 'CANCELLED')
                 AND pending_standard_arrival_quantity > 0
             GROUP BY po_number, vendor_name, vendor_location_type
@@ -537,60 +551,280 @@ class InboundDataLoader:
         except Exception as e:
             logger.error(f"Error getting pending stock-in summary: {e}")
             return pd.DataFrame()
-    
+        
+
     def get_vendor_performance_metrics(self, vendor_name=None, months=6):
-        """Get vendor performance metrics"""
+        """
+        Get comprehensive vendor performance metrics.
+        
+        Args:
+            vendor_name (str, optional): Specific vendor to filter. If None, returns all vendors.
+            months (int): Number of months to look back from current date. Default is 6.
+        
+        Returns:
+            pd.DataFrame: Vendor performance metrics including on-time rate, completion rate, etc.
+        """
         try:
+            # Base query with proper DISTINCT counting for PO-level metrics
             query = """
             SELECT 
                 vendor_name,
                 vendor_type,
                 vendor_location_type,
+                
+                -- PO counts (count distinct POs, not lines)
                 COUNT(DISTINCT po_number) as total_pos,
+                COUNT(DISTINCT CASE WHEN status = 'COMPLETED' THEN po_number END) as completed_pos,
+                COUNT(DISTINCT CASE WHEN status = 'PENDING' THEN po_number END) as pending_pos,
+                COUNT(DISTINCT CASE WHEN status = 'IN_PROCESS' THEN po_number END) as in_process_pos,
                 
-                -- Completion metrics
-                SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as completed_pos,
-                AVG(arrival_completion_percent) as avg_completion_rate,
+                -- Line-level counts (for reference)
+                COUNT(*) as total_po_lines,
                 
-                -- On-time metrics
-                SUM(CASE WHEN eta >= etd AND status = 'COMPLETED' THEN 1 ELSE 0 END) as on_time_deliveries,
+                -- Average completion percentage across all lines
+                AVG(arrival_completion_percent) as avg_arrival_completion,
+                AVG(invoice_completion_percent) as avg_invoice_completion,
                 
-                -- Over-delivery metrics
-                SUM(CASE WHEN is_over_delivered = 'Y' THEN 1 ELSE 0 END) as over_deliveries,
-                AVG(CASE WHEN is_over_delivered = 'Y' 
-                    THEN (total_standard_arrived_quantity - standard_quantity) / standard_quantity * 100 
-                    ELSE 0 END) as avg_over_delivery_percent,
+                -- On-time delivery metrics (PO level)
+                COUNT(DISTINCT CASE 
+                    WHEN eta >= etd AND status = 'COMPLETED' 
+                    THEN po_number 
+                END) as on_time_deliveries,
+                
+                -- Late deliveries
+                COUNT(DISTINCT CASE 
+                    WHEN eta < etd AND status = 'COMPLETED' 
+                    THEN po_number 
+                END) as late_deliveries,
+                
+                -- Over-delivery metrics (line level as one PO can have multiple over-delivered lines)
+                SUM(CASE WHEN is_over_delivered = 'Y' THEN 1 ELSE 0 END) as over_delivery_lines,
+                COUNT(DISTINCT CASE WHEN is_over_delivered = 'Y' THEN po_number END) as over_delivery_pos,
+                
+                -- Average over-delivery percentage (only for over-delivered items)
+                AVG(CASE 
+                    WHEN is_over_delivered = 'Y' 
+                    THEN ((total_standard_arrived_quantity - standard_quantity) / NULLIF(standard_quantity, 0)) * 100 
+                    ELSE NULL 
+                END) as avg_over_delivery_percent,
+                
+                -- Lead time metrics (in days)
+                AVG(CASE 
+                    WHEN status = 'COMPLETED' AND eta IS NOT NULL AND etd IS NOT NULL
+                    THEN DATEDIFF(eta, etd)
+                    ELSE NULL
+                END) as avg_lead_time_days,
                 
                 -- Financial metrics
                 SUM(total_amount_usd) as total_po_value,
-                SUM(outstanding_invoiced_amount_usd) as outstanding_invoices
+                SUM(outstanding_arrival_amount_usd) as outstanding_arrival_value,
+                SUM(outstanding_invoiced_amount_usd) as outstanding_invoices,
+                SUM(invoiced_amount_usd) as total_invoiced,
+                
+                -- Payment performance
+                AVG(CASE 
+                    WHEN total_amount_usd > 0 
+                    THEN (invoiced_amount_usd / total_amount_usd) * 100
+                    ELSE NULL
+                END) as avg_payment_progress,
+                
+                -- Additional vendor info
+                MIN(po_date) as first_po_date,
+                MAX(po_date) as last_po_date,
+                COUNT(DISTINCT currency) as currency_count,
+                COUNT(DISTINCT payment_term) as payment_term_count
                 
             FROM purchase_order_full_view
             WHERE po_date >= DATE_SUB(CURDATE(), INTERVAL :months MONTH)
+                AND po_date <= CURDATE()
             """
             
+            # Build parameters
             params = {'months': months}
             
+            # Add vendor filter if specified
             if vendor_name:
                 query += " AND vendor_name = :vendor_name"
                 params['vendor_name'] = vendor_name
             
-            query += " GROUP BY vendor_name, vendor_type, vendor_location_type ORDER BY total_po_value DESC"
+            # Group by vendor attributes
+            query += """
+            GROUP BY vendor_name, vendor_type, vendor_location_type
+            ORDER BY total_po_value DESC
+            """
             
+            # Execute query
             with self.engine.connect() as conn:
                 df = pd.read_sql(text(query), conn, params=params)
             
-            # Calculate on-time delivery rate
-            if not df.empty:
-                df['on_time_rate'] = (df['on_time_deliveries'] / df['completed_pos'] * 100).fillna(0)
-                df['completion_rate'] = (df['completed_pos'] / df['total_pos'] * 100).fillna(0)
+            # Return empty dataframe if no results
+            if df.empty:
+                logger.warning(f"No vendor performance data found for the last {months} months")
+                return df
             
+            # Calculate derived metrics
+            # 1. On-time delivery rate (percentage of completed POs delivered on time)
+            df['on_time_rate'] = df.apply(
+                lambda row: (row['on_time_deliveries'] / row['completed_pos'] * 100) 
+                if row['completed_pos'] > 0 else 0, 
+                axis=1
+            ).round(1)
+            
+            # 2. Completion rate (percentage of total POs that are completed)
+            df['completion_rate'] = (
+                df['completed_pos'] / df['total_pos'] * 100
+            ).fillna(0).round(1)
+            
+            # 3. Over-delivery rate (percentage of completed POs with over-deliveries)
+            df['over_delivery_rate'] = df.apply(
+                lambda row: (row['over_delivery_pos'] / row['completed_pos'] * 100) 
+                if row['completed_pos'] > 0 else 0,
+                axis=1
+            ).round(1)
+            
+            # 4. Late delivery rate
+            df['late_delivery_rate'] = df.apply(
+                lambda row: (row['late_deliveries'] / row['completed_pos'] * 100) 
+                if row['completed_pos'] > 0 else 0,
+                axis=1
+            ).round(1)
+            
+            # 5. Fill NaN values for over_delivery_percent
+            df['avg_over_delivery_percent'] = df['avg_over_delivery_percent'].fillna(0).round(1)
+            
+            # 6. Calculate performance score (weighted composite metric)
+            df['performance_score'] = self._calculate_performance_score(df)
+            
+            # 7. Add performance tier
+            df['performance_tier'] = df['performance_score'].apply(self._get_performance_tier)
+            
+            # 8. Format lead time
+            df['avg_lead_time_days'] = df['avg_lead_time_days'].fillna(0).round(1)
+            
+            # Log summary
+            logger.info(
+                f"Retrieved performance metrics for {len(df)} vendors "
+                f"(last {months} months, vendor: {vendor_name or 'All'})"
+            )
+            
+            # Backward compatibility aliases
+            df['over_deliveries'] = df['over_delivery_pos']
+
             return df
             
         except Exception as e:
-            logger.error(f"Error getting vendor performance: {e}")
+            logger.error(f"Error getting vendor performance metrics: {e}", exc_info=True)
             return pd.DataFrame()
-    
+
+    def _calculate_performance_score(self, df):
+        """
+        Calculate weighted performance score for vendors.
+        
+        Weights:
+        - On-time delivery: 40%
+        - Completion rate: 30%
+        - No over-delivery penalty: 20%
+        - Payment progress: 10%
+        
+        Returns score between 0-100.
+        """
+        # Ensure all required columns exist
+        required_cols = ['on_time_rate', 'completion_rate', 'over_delivery_rate', 'avg_payment_progress']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = 0
+        
+        # Calculate weighted score
+        performance_score = (
+            df['on_time_rate'] * 0.4 +                          # 40% weight
+            df['completion_rate'] * 0.3 +                       # 30% weight
+            (100 - df['over_delivery_rate'].clip(upper=100)) * 0.2 +  # 20% weight (penalty for over-delivery)
+            df['avg_payment_progress'].fillna(0).clip(upper=100) * 0.1    # 10% weight
+        )
+        
+        return performance_score.round(1)
+
+    def _get_performance_tier(self, score):
+        """
+        Categorize vendor performance based on score.
+        
+        Tiers:
+        - Excellent: >= 90
+        - Good: >= 75
+        - Fair: >= 60
+        - Poor: < 60
+        """
+        if score >= 90:
+            return "Excellent"
+        elif score >= 75:
+            return "Good"
+        elif score >= 60:
+            return "Fair"
+        else:
+            return "Poor"
+
+    # Optional: Add a method to get detailed vendor metrics
+    def get_vendor_performance_details(self, vendor_name, months=6):
+        """
+        Get detailed performance breakdown for a specific vendor.
+        
+        Returns both summary metrics and monthly trend data.
+        """
+        try:
+            # Get summary metrics
+            summary = self.get_vendor_performance_metrics(vendor_name=vendor_name, months=months)
+            
+            if summary.empty:
+                return pd.DataFrame(), pd.DataFrame()
+            
+            # Get monthly trend
+            trend_query = """
+            SELECT 
+                DATE_FORMAT(po_date, '%Y-%m') as month,
+                COUNT(DISTINCT po_number) as monthly_pos,
+                COUNT(DISTINCT CASE WHEN status = 'COMPLETED' THEN po_number END) as completed_pos,
+                COUNT(DISTINCT CASE 
+                    WHEN eta >= etd AND status = 'COMPLETED' THEN po_number 
+                END) as on_time_pos,
+                SUM(total_amount_usd) as monthly_value,
+                AVG(CASE 
+                    WHEN status = 'COMPLETED' AND eta IS NOT NULL AND etd IS NOT NULL
+                    THEN DATEDIFF(eta, etd)
+                    ELSE NULL
+                END) as avg_lead_time
+            FROM purchase_order_full_view
+            WHERE vendor_name = :vendor_name
+                AND po_date >= DATE_SUB(CURDATE(), INTERVAL :months MONTH)
+            GROUP BY DATE_FORMAT(po_date, '%Y-%m')
+            ORDER BY month
+            """
+            
+            with self.engine.connect() as conn:
+                trend_df = pd.read_sql(
+                    text(trend_query), 
+                    conn, 
+                    params={'vendor_name': vendor_name, 'months': months}
+                )
+            
+            # Calculate monthly rates
+            if not trend_df.empty:
+                trend_df['monthly_completion_rate'] = (
+                    trend_df['completed_pos'] / trend_df['monthly_pos'] * 100
+                ).round(1)
+                
+                trend_df['monthly_on_time_rate'] = trend_df.apply(
+                    lambda row: (row['on_time_pos'] / row['completed_pos'] * 100) 
+                    if row['completed_pos'] > 0 else 0,
+                    axis=1
+                ).round(1)
+            
+            return summary, trend_df
+            
+        except Exception as e:
+            logger.error(f"Error getting vendor performance details: {e}")
+            return pd.DataFrame(), pd.DataFrame()
+
+
     def get_product_demand_vs_incoming(self):
         """Get product demand vs incoming supply analysis with current stock"""
         try:
@@ -615,7 +849,8 @@ class InboundDataLoader:
                     product_name as product_pn,
                     pt_code,
                     SUM(pending_standard_arrival_quantity) as incoming_qty,
-                    MIN(etd) as next_arrival_date,
+                    MIN(etd) as next_arrival_date_etd,
+                    MIN(eta) as next_arrival_date_eta,
                     COUNT(DISTINCT po_number) as pending_po_count
                 FROM purchase_order_full_view
                 WHERE status != 'COMPLETED'
@@ -648,7 +883,8 @@ class InboundDataLoader:
                 END as total_coverage_percent,
                 
                 -- Supply info
-                s.next_arrival_date,
+                s.next_arrival_date_etd,
+                s.next_arrival_date_eta,
                 COALESCE(s.pending_po_count, 0) as pending_po_count,
                 
                 -- Status
@@ -677,15 +913,18 @@ class InboundDataLoader:
             logger.error(f"Error getting product demand vs incoming: {e}")
             return pd.DataFrame()
     
-    def get_po_timeline_data(self, weeks_ahead=8):
-        """Get PO timeline data for visualization"""
+    def get_po_timeline_data(self, weeks_ahead=8, date_type='etd'):
+        """Get PO timeline data for visualization based on ETD or ETA"""
         try:
             today = datetime.now().date()
             end_date = today + timedelta(weeks=weeks_ahead)
             
-            query = text("""
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = text(f"""
             SELECT 
-                DATE(etd) as arrival_date,
+                DATE({date_column}) as arrival_date,
                 vendor_name,
                 vendor_location_type,
                 COUNT(DISTINCT po_number) as po_count,
@@ -694,11 +933,11 @@ class InboundDataLoader:
                 SUM(outstanding_arrival_amount_usd) as arrival_value,
                 GROUP_CONCAT(DISTINCT pt_code SEPARATOR ', ') as products
             FROM purchase_order_full_view
-            WHERE etd >= :today
-                AND etd <= :end_date
+            WHERE {date_column} >= :today
+                AND {date_column} <= :end_date
                 AND status != 'COMPLETED'
                 AND pending_standard_arrival_quantity > 0
-            GROUP BY DATE(etd), vendor_name, vendor_location_type
+            GROUP BY DATE({date_column}), vendor_name, vendor_location_type
             ORDER BY arrival_date, vendor_name
             """)
             
@@ -838,8 +1077,20 @@ class InboundDataLoader:
                 if filters.get('etd_to'):
                     query += " AND etd <= :etd_to"
                     params['etd_to'] = filters['etd_to']
+                
+                if filters.get('eta_from'):
+                    query += " AND eta >= :eta_from"
+                    params['eta_from'] = filters['eta_from']
+                
+                if filters.get('eta_to'):
+                    query += " AND eta <= :eta_to"
+                    params['eta_to'] = filters['eta_to']
             
-            query += " ORDER BY etd, vendor_country_name, po_number"
+            # Determine sort order based on available filters
+            if filters and 'eta_from' in filters:
+                query += " ORDER BY eta, vendor_country_name, po_number"
+            else:
+                query += " ORDER BY etd, vendor_country_name, po_number"
             
             with self.engine.connect() as conn:
                 df = pd.read_sql(text(query), conn, params=params)
@@ -850,10 +1101,13 @@ class InboundDataLoader:
             logger.error(f"Error loading customs PO data: {e}")
             return pd.DataFrame()
 
-    def get_overdue_pos_by_creator(self, creator_email):
-        """Get overdue POs for a specific creator"""
+    def get_overdue_pos_by_creator(self, creator_email, date_type='etd'):
+        """Get overdue POs for a specific creator based on ETD or ETA"""
         try:
-            query = text("""
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = text(f"""
             SELECT 
                 po_number,
                 vendor_name,
@@ -861,12 +1115,12 @@ class InboundDataLoader:
                 COUNT(DISTINCT po_line_id) as line_items,
                 SUM(pending_standard_arrival_quantity) as pending_qty,
                 SUM(outstanding_arrival_amount_usd) as outstanding_value,
-                MIN(etd) as original_etd,
-                DATEDIFF(CURDATE(), MIN(etd)) as days_overdue,
+                MIN({date_column}) as original_{date_column},
+                DATEDIFF(CURDATE(), MIN({date_column})) as days_overdue,
                 GROUP_CONCAT(DISTINCT pt_code SEPARATOR ', ') as products
             FROM purchase_order_full_view
             WHERE created_by = :creator_email
-                AND etd < CURDATE()
+                AND {date_column} < CURDATE()
                 AND status NOT IN ('COMPLETED')
                 AND pending_standard_arrival_quantity > 0
             GROUP BY po_number, vendor_name, vendor_country_name
@@ -1017,13 +1271,16 @@ class InboundDataLoader:
             logger.error(f"Error loading customs CAN data: {e}")
             return pd.DataFrame()
 
-    def get_international_shipment_summary(self, weeks_ahead=4):
+    def get_international_shipment_summary(self, weeks_ahead=4, date_type='etd'):
         """Get summary of international shipments (POs and CANs) for customs"""
         try:
             today = datetime.now().date()
             end_date = today + timedelta(weeks=weeks_ahead)
             
-            query = text("""
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = text(f"""
             WITH po_summary AS (
                 SELECT 
                     'Purchase Orders' as shipment_type,
@@ -1034,8 +1291,8 @@ class InboundDataLoader:
                 FROM purchase_order_full_view
                 WHERE vendor_location_type = 'International'
                     AND status NOT IN ('COMPLETED')
-                    AND etd >= :today
-                    AND etd <= :end_date
+                    AND {date_column} >= :today
+                    AND {date_column} <= :end_date
                     AND pending_standard_arrival_quantity > 0
             ),
             can_summary AS (
@@ -1150,11 +1407,13 @@ class InboundDataLoader:
             return pd.DataFrame()
 
 
-    def get_vendors_with_active_pos(self):
+    def get_vendors_with_active_pos(self, date_type='etd'):
         """Get list of vendors with active POs and their contact information"""
         try:
-            # Không dùng decorator @st.cache_data ở đây
-            query = text("""
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = text(f"""
             SELECT 
                 vendor_name,
                 vendor_code,
@@ -1166,7 +1425,7 @@ class InboundDataLoader:
                 vendor_contact_phone as contact_phone,
                 COUNT(DISTINCT po_number) as active_pos,
                 SUM(outstanding_arrival_amount_usd) as outstanding_value,
-                MIN(etd) as next_etd,
+                MIN({date_column}) as next_{date_column},
                 GROUP_CONCAT(DISTINCT created_by SEPARATOR ', ') as po_creators
             FROM purchase_order_full_view
             WHERE status NOT IN ('COMPLETED', 'CANCELLED')
@@ -1243,10 +1502,13 @@ class InboundDataLoader:
             return pd.DataFrame()
 
     @st.cache_data(ttl=300)  
-    def get_vendor_pos(_self, vendor_name: str, weeks_ahead: int = 4, include_overdue: bool = True):
-        """Get POs for a specific vendor including overdue and upcoming"""
+    def get_vendor_pos(_self, vendor_name: str, weeks_ahead: int = 4, date_type: str = 'etd', include_overdue: bool = True):
+        """Get POs for a specific vendor including overdue and upcoming based on ETD or ETA"""
         try:
-            query = """
+            # Validate date_type
+            date_column = date_type.lower() if date_type.lower() in ['etd', 'eta'] else 'etd'
+            
+            query = f"""
             SELECT *
             FROM purchase_order_full_view
             WHERE vendor_name = :vendor_name
@@ -1258,22 +1520,22 @@ class InboundDataLoader:
             
             if include_overdue:
                 # Include all POs: overdue + upcoming
-                query += """
+                query += f"""
                     AND (
-                        etd < CURDATE()  -- Overdue
-                        OR (etd >= CURDATE() AND etd <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK))  -- Upcoming
+                        {date_column} < CURDATE()  -- Overdue
+                        OR ({date_column} >= CURDATE() AND {date_column} <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK))  -- Upcoming
                     )
                 """
                 params['weeks'] = weeks_ahead
             else:
                 # Only upcoming POs
-                query += """
-                    AND etd >= CURDATE()
-                    AND etd <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK)
+                query += f"""
+                    AND {date_column} >= CURDATE()
+                    AND {date_column} <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK)
                 """
                 params['weeks'] = weeks_ahead
             
-            query += " ORDER BY etd, po_number"
+            query += f" ORDER BY {date_column}, po_number"
             
             with _self.engine.connect() as conn:
                 df = pd.read_sql(text(query), conn, params=params)

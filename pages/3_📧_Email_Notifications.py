@@ -48,10 +48,13 @@ def validate_email(email):
 
 # Get creators list with active POs
 @st.cache_data(ttl=300)
-def get_creators_list(weeks_ahead=4):
+def get_creators_list(weeks_ahead=4, date_type='etd'):
     """Get list of PO creators with active orders"""
     try:
-        query = text("""
+        # Use the appropriate date column based on date_type
+        date_column = date_type.lower()  # 'etd' or 'eta'
+        
+        query = text(f"""
         SELECT DISTINCT 
             e.id,
             e.keycloak_id,
@@ -67,8 +70,8 @@ def get_creators_list(weeks_ahead=4):
         LEFT JOIN employees m ON e.manager_id = m.id
         INNER JOIN purchase_order_full_view po ON po.created_by = e.email
         WHERE po.status NOT IN ('COMPLETED')
-            AND po.etd >= CURDATE()
-            AND po.etd <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK)
+            AND po.{date_column} >= CURDATE()
+            AND po.{date_column} <= DATE_ADD(CURDATE(), INTERVAL :weeks WEEK)
             AND po.pending_standard_arrival_quantity > 0
         GROUP BY e.id, e.keycloak_id, e.first_name, e.last_name, 
                  e.email, e.manager_id, m.email, m.first_name, m.last_name
@@ -86,10 +89,13 @@ def get_creators_list(weeks_ahead=4):
 
 # Get creators with overdue items
 @st.cache_data(ttl=300)
-def get_creators_overdue():
+def get_creators_overdue(date_type='etd'):
     """Get list of creators with overdue POs or pending CAN items"""
     try:
-        query = text("""
+        # Use the appropriate date column based on date_type
+        date_column = date_type.lower()  # 'etd' or 'eta'
+        
+        query = text(f"""
         WITH overdue_pos AS (
             SELECT 
                 e.id,
@@ -101,11 +107,11 @@ def get_creators_overdue():
                 CONCAT(m.first_name, ' ', m.last_name) as manager_name,
                 COUNT(DISTINCT po.po_number) as overdue_pos,
                 SUM(po.outstanding_arrival_amount_usd) as overdue_value,
-                MAX(DATEDIFF(CURDATE(), po.etd)) as max_days_overdue
+                MAX(DATEDIFF(CURDATE(), po.{date_column})) as max_days_overdue
             FROM employees e
             LEFT JOIN employees m ON e.manager_id = m.id
             INNER JOIN purchase_order_full_view po ON po.created_by = e.email
-            WHERE po.etd < CURDATE()
+            WHERE po.{date_column} < CURDATE()
                 AND po.status NOT IN ('COMPLETED')
                 AND po.pending_standard_arrival_quantity > 0
             GROUP BY e.id, e.keycloak_id, e.first_name, e.last_name, e.email,
@@ -187,6 +193,8 @@ if 'notification_type' not in st.session_state:
     st.session_state.notification_type = '📅 PO Schedule'
 if 'weeks_ahead' not in st.session_state:
     st.session_state.weeks_ahead = 4
+if 'date_type' not in st.session_state:
+    st.session_state.date_type = 'ETD'
 if 'recipient_type' not in st.session_state:
     st.session_state.recipient_type = 'creators'
 if 'selected_vendors' not in st.session_state:
@@ -230,8 +238,30 @@ with col2:
             help="Select how many weeks ahead to include"
         )
         st.session_state.weeks_ahead = weeks_ahead
+        
+        # Date type selection (ETD or ETA)
+        date_type = st.radio(
+            "📆 Date Type",
+            ["ETD", "ETA"],
+            index=0 if st.session_state.date_type == "ETD" else 1,
+            help="ETD: Estimated Time of Departure | ETA: Estimated Time of Arrival",
+            horizontal=True
+        )
+        st.session_state.date_type = date_type
     else:
         weeks_ahead = st.session_state.get('weeks_ahead', 4)
+        date_type = st.session_state.get('date_type', 'ETD')
+    
+    # For Critical Alerts, also use date type selection
+    if notification_type == "🚨 Critical Alerts":
+        date_type = st.radio(
+            "📆 Date Type for Overdue",
+            ["ETD", "ETA"],
+            index=0 if st.session_state.get('date_type', 'ETD') == "ETD" else 1,
+            help="Check overdue based on ETD or ETA",
+            horizontal=True
+        )
+        st.session_state.date_type = date_type
     
     # Schedule type
     schedule_type = st.radio(
@@ -243,11 +273,11 @@ with col2:
 # Now load creators data based on notification type
 creators_df = pd.DataFrame()  # Initialize empty
 if notification_type == "🚨 Critical Alerts":
-    creators_df = get_creators_overdue()
+    creators_df = get_creators_overdue(date_type.lower())
 elif notification_type == "📦 Pending Stock-in":
     creators_df = get_creators_with_pending_cans()
 elif notification_type != "🛃 Custom Clearance":
-    creators_df = get_creators_list(weeks_ahead)
+    creators_df = get_creators_list(weeks_ahead, date_type.lower())
 
 with col1:
     st.subheader("📋 Recipient Selection")
@@ -259,11 +289,11 @@ with col1:
     
     # Special handling for Custom Clearance
     if notification_type == "🛃 Custom Clearance":
-        st.info(f"📌 Custom Clearance notifications will be sent to the customs team for international shipments in the next {weeks_ahead} weeks")
+        st.info(f"📌 Custom Clearance notifications will be sent to the customs team for international shipments in the next {weeks_ahead} weeks (based on {date_type})")
         
         # Show summary of international shipments
         try:
-            intl_summary = data_loader.get_international_shipment_summary(weeks_ahead)
+            intl_summary = data_loader.get_international_shipment_summary(weeks_ahead, date_type.lower())
             
             col1_1, col1_2, col1_3, col1_4 = st.columns(4)
             with col1_1:
@@ -275,7 +305,7 @@ with col1:
             with col1_4:
                 st.metric("Total Value", f"${intl_summary.get('total_value', 0)/1000000:.1f}M")
             
-            st.caption(f"🔍 Auto-applied filters: International vendors only | Next {weeks_ahead} weeks | Pending items only")
+            st.caption(f"🔍 Auto-applied filters: International vendors only | Next {weeks_ahead} weeks | Pending items only | Based on {date_type}")
         except Exception as e:
             st.warning("Could not load international shipment summary")
             logger.error(f"Error loading international shipment summary: {e}")
@@ -369,7 +399,7 @@ with col1:
         
         elif recipient_type == "vendors":
             # Load vendors with active POs
-            vendors_df = data_loader.get_vendors_with_active_pos()
+            vendors_df = data_loader.get_vendors_with_active_pos(date_type.lower())
             
             if not vendors_df.empty:
                 # First step: Select vendors
@@ -563,8 +593,8 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
             if notification_type == "🛃 Custom Clearance":
                 # Custom clearance preview
                 po_filters = {
-                    'etd_from': datetime.now().date(),
-                    'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                    f'{date_type.lower()}_from': datetime.now().date(),
+                    f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                 }
                 intl_pos = data_loader.load_po_data_for_customs(po_filters)
                 
@@ -575,9 +605,9 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                 intl_cans = data_loader.load_can_data_for_customs(can_filters)
                 
                 if intl_pos is not None and (not intl_pos.empty or (intl_cans is not None and not intl_cans.empty)):
-                    st.subheader("📧 Preview - Custom Clearance Schedule")
+                    st.subheader(f"📧 Preview - Custom Clearance Schedule ({date_type})")
                     
-                    tab1, tab2 = st.tabs(["📅 Purchase Orders ETD", "📦 Container Arrivals"])
+                    tab1, tab2 = st.tabs([f"📅 Purchase Orders {date_type}", "📦 Container Arrivals"])
                     
                     with tab1:
                         if intl_pos is not None and not intl_pos.empty:
@@ -592,9 +622,9 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                             country_summary['Value USD'] = country_summary['Value USD'].apply(lambda x: f"${x:,.0f}")
                             st.dataframe(country_summary, use_container_width=True, hide_index=True)
                             
-                            st.caption(f"Total {len(intl_pos)} international PO lines")
+                            st.caption(f"Total {len(intl_pos)} international PO lines (based on {date_type})")
                         else:
-                            st.info("No international POs found for the selected period")
+                            st.info(f"No international POs found for the selected period (based on {date_type})")
                     
                     with tab2:
                         if intl_cans is not None and not intl_cans.empty:
@@ -613,7 +643,7 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                         else:
                             st.info("No international container arrivals found for the selected period")
                 else:
-                    st.warning(f"No international shipments found for the next {weeks_ahead} weeks")
+                    st.warning(f"No international shipments found for the next {weeks_ahead} weeks (based on {date_type})")
                     
             elif recipient_type == "vendors" and st.session_state.selected_vendor_contacts:
                 # Vendor preview - show first vendor contact
@@ -622,15 +652,15 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                 
                 if notification_type == "📅 PO Schedule":
                     # Get POs for this vendor
-                    po_df = data_loader.get_vendor_pos(contact['vendor_name'], weeks_ahead)
+                    po_df = data_loader.get_vendor_pos(contact['vendor_name'], weeks_ahead, date_type.lower())
                     
                     if po_df is not None and not po_df.empty:
                         # Separate overdue and upcoming
-                        po_df['etd'] = pd.to_datetime(po_df['etd'])
+                        po_df[date_type.lower()] = pd.to_datetime(po_df[date_type.lower()])
                         today = datetime.now().date()
                         
-                        overdue_pos = po_df[po_df['etd'].dt.date < today]
-                        upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+                        overdue_pos = po_df[po_df[date_type.lower()].dt.date < today]
+                        upcoming_pos = po_df[po_df[date_type.lower()].dt.date >= today]
                         
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
@@ -643,14 +673,14 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                             st.metric("Total Value", f"${po_df['outstanding_arrival_amount_usd'].sum()/1000:.0f}K")
                         
                         if not overdue_pos.empty:
-                            st.markdown("#### 🚨 Overdue POs")
-                            display_cols = ['etd', 'po_number', 'pt_code', 'product_name', 
+                            st.markdown(f"#### 🚨 Overdue POs (by {date_type})")
+                            display_cols = [date_type.lower(), 'po_number', 'pt_code', 'product_name', 
                                           'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
                             st.dataframe(overdue_pos.head(5)[display_cols], use_container_width=True, hide_index=True)
                         
                         if not upcoming_pos.empty:
-                            st.markdown("#### 📅 Upcoming POs")
-                            display_cols = ['etd', 'po_number', 'pt_code', 'product_name', 
+                            st.markdown(f"#### 📅 Upcoming POs (by {date_type})")
+                            display_cols = [date_type.lower(), 'po_number', 'pt_code', 'product_name', 
                                           'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
                             st.dataframe(upcoming_pos.head(5)[display_cols], use_container_width=True, hide_index=True)
                     else:
@@ -669,8 +699,8 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                 if notification_type == "📅 PO Schedule":
                     filters = {
                         'created_by': preview_email,
-                        'etd_from': datetime.now().date(),
-                        'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                        f'{date_type.lower()}_from': datetime.now().date(),
+                        f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                     }
                     preview_df = data_loader.load_po_data(filters)
                     
@@ -683,28 +713,28 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                         with col3:
                             st.metric("Value", f"${preview_df['outstanding_arrival_amount_usd'].sum()/1000:.0f}K")
                         with col4:
-                            overdue = preview_df[pd.to_datetime(preview_df['etd']) < datetime.now()]
-                            st.metric("Overdue", len(overdue))
+                            overdue = preview_df[pd.to_datetime(preview_df[date_type.lower()]) < datetime.now()]
+                            st.metric(f"Overdue ({date_type})", len(overdue))
                         
-                        st.markdown("#### Sample POs")
-                        display_cols = ['etd', 'po_number', 'vendor_name', 'pt_code', 'product_name', 
+                        st.markdown(f"#### Sample POs (sorted by {date_type})")
+                        display_cols = [date_type.lower(), 'po_number', 'vendor_name', 'pt_code', 'product_name', 
                                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
                         st.dataframe(preview_df.head(5)[display_cols], use_container_width=True, hide_index=True)
                     else:
                         st.info("No POs found for this creator")
                         
                 elif notification_type == "🚨 Critical Alerts":
-                    overdue_pos = data_loader.get_overdue_pos_by_creator(preview_email)
+                    overdue_pos = data_loader.get_overdue_pos_by_creator(preview_email, date_type.lower())
                     pending_cans = data_loader.get_pending_cans_by_creator(preview_email)
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Overdue POs", len(overdue_pos) if overdue_pos is not None and not overdue_pos.empty else 0)
+                        st.metric(f"Overdue POs ({date_type})", len(overdue_pos) if overdue_pos is not None and not overdue_pos.empty else 0)
                     with col2:
                         st.metric("Pending CANs > 7 days", len(pending_cans) if pending_cans is not None and not pending_cans.empty else 0)
                     
                     if overdue_pos is not None and not overdue_pos.empty:
-                        st.markdown("#### Overdue Purchase Orders")
+                        st.markdown(f"#### Overdue Purchase Orders (by {date_type})")
                         st.dataframe(overdue_pos.head(5), use_container_width=True, hide_index=True)
                     
                     if pending_cans is not None and not pending_cans.empty:
@@ -750,8 +780,8 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                 
                 if notification_type == "📅 PO Schedule":
                     filters = {
-                        'etd_from': datetime.now().date(),
-                        'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                        f'{date_type.lower()}_from': datetime.now().date(),
+                        f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                     }
                     preview_df = data_loader.load_po_data(filters)
                     
@@ -764,13 +794,13 @@ if show_preview and st.button("👁️ Preview Email Content", type="secondary")
                         with col3:
                             st.metric("Total Value", f"${preview_df['outstanding_arrival_amount_usd'].sum()/1000000:.1f}M")
                         with col4:
-                            overdue = preview_df[pd.to_datetime(preview_df['etd']) < datetime.now()]
-                            st.metric("Overdue", len(overdue))
+                            overdue = preview_df[pd.to_datetime(preview_df[date_type.lower()]) < datetime.now()]
+                            st.metric(f"Overdue ({date_type})", len(overdue))
                         
-                        st.info(f"Note: Custom recipients will receive a general PO schedule overview for the next {weeks_ahead} weeks")
+                        st.info(f"Note: Custom recipients will receive a general PO schedule overview for the next {weeks_ahead} weeks based on {date_type}")
                         
-                        st.markdown("#### Sample POs (First 10)")
-                        display_cols = ['etd', 'po_number', 'vendor_name', 'pt_code', 'product_name', 
+                        st.markdown(f"#### Sample POs (First 10) - Sorted by {date_type}")
+                        display_cols = [date_type.lower(), 'po_number', 'vendor_name', 'pt_code', 'product_name', 
                                       'pending_standard_arrival_quantity', 'outstanding_arrival_amount_usd']
                         st.dataframe(preview_df.head(10)[display_cols], use_container_width=True, hide_index=True)
                     else:
@@ -797,14 +827,14 @@ if ready_to_send and schedule_type == "Send Now":
     
     # Warning message based on notification type and recipient type
     if notification_type == "🛃 Custom Clearance":
-        st.warning(f"⚠️ You are about to send international PO schedule ({weeks_ahead} weeks) to custom.clearance@prostech.vn")
+        st.warning(f"⚠️ You are about to send international PO schedule ({weeks_ahead} weeks, {date_type}) to custom.clearance@prostech.vn")
         if cc_emails:
             st.info(f"CC: {', '.join(cc_emails)}")
     
     elif recipient_type == "vendors":
         if notification_type == "📅 PO Schedule":
             num_contacts = len(st.session_state.selected_vendor_contacts)
-            st.warning(f"⚠️ You are about to send PO Schedule ({weeks_ahead} weeks) to {num_contacts} vendor contacts")
+            st.warning(f"⚠️ You are about to send PO Schedule ({weeks_ahead} weeks, {date_type}) to {num_contacts} vendor contacts")
             st.info("📌 Email will include: Overdue POs + Upcoming POs for selected period")
         else:
             st.error(f"❌ {notification_type} is not available for vendor recipients")
@@ -813,16 +843,16 @@ if ready_to_send and schedule_type == "Send Now":
             st.info(f"CC: {', '.join(cc_emails)}")
     
     elif recipient_type == "custom":
-        period_info = f" ({weeks_ahead} weeks)" if notification_type == "📅 PO Schedule" else ""
+        period_info = f" ({weeks_ahead} weeks, {date_type})" if notification_type == "📅 PO Schedule" else ""
         st.warning(f"⚠️ You are about to send {notification_type}{period_info} emails to {len(custom_recipients)} custom recipients")
         if cc_emails:
             st.info(f"CC: {', '.join(cc_emails)}")
     
     elif recipient_type == "creators":
         if notification_type == "🚨 Critical Alerts":
-            st.warning(f"⚠️ You are about to send CRITICAL ALERT emails to {len(selected_creators)} creators about overdue items")
+            st.warning(f"⚠️ You are about to send CRITICAL ALERT emails to {len(selected_creators)} creators about overdue items (based on {date_type})")
         else:
-            period_info = f" ({weeks_ahead} weeks)" if notification_type == "📅 PO Schedule" else ""
+            period_info = f" ({weeks_ahead} weeks, {date_type})" if notification_type == "📅 PO Schedule" else ""
             st.warning(f"⚠️ You are about to send {notification_type}{period_info} emails to {len(selected_creators)} creators")
         if cc_emails:
             st.info(f"CC: {', '.join(cc_emails)}")
@@ -844,8 +874,8 @@ if ready_to_send and schedule_type == "Send Now":
             
             try:
                 po_filters = {
-                    'etd_from': datetime.now().date(),
-                    'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                    f'{date_type.lower()}_from': datetime.now().date(),
+                    f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                 }
                 intl_pos = data_loader.load_po_data_for_customs(po_filters)
                 
@@ -861,7 +891,8 @@ if ready_to_send and schedule_type == "Send Now":
                         intl_pos if intl_pos is not None else pd.DataFrame(),
                         intl_cans if intl_cans is not None else pd.DataFrame(),
                         cc_emails=cc_emails if cc_emails else None,
-                        weeks_ahead=weeks_ahead
+                        weeks_ahead=weeks_ahead,
+                        date_type=date_type.lower()
                     )
                     
                     results.append({
@@ -913,15 +944,15 @@ if ready_to_send and schedule_type == "Send Now":
                     
                     try:
                         # Get all POs for this vendor (overdue + upcoming)
-                        po_df = data_loader.get_vendor_pos(vendor_name, weeks_ahead, include_overdue=True)
+                        po_df = data_loader.get_vendor_pos(vendor_name, weeks_ahead, date_type.lower(), include_overdue=True)
                         
                         if po_df is not None and not po_df.empty:
                             # Count overdue and upcoming
-                            po_df['etd'] = pd.to_datetime(po_df['etd'])
+                            po_df[date_type.lower()] = pd.to_datetime(po_df[date_type.lower()])
                             today = datetime.now().date()
                             
-                            overdue_count = len(po_df[po_df['etd'].dt.date < today]['po_number'].unique())
-                            upcoming_count = len(po_df[po_df['etd'].dt.date >= today]['po_number'].unique())
+                            overdue_count = len(po_df[po_df[date_type.lower()].dt.date < today]['po_number'].unique())
+                            upcoming_count = len(po_df[po_df[date_type.lower()].dt.date >= today]['po_number'].unique())
                             
                             success, message = email_sender.send_vendor_po_schedule(
                                 vendor_email,
@@ -930,7 +961,8 @@ if ready_to_send and schedule_type == "Send Now":
                                 cc_emails=cc_emails,
                                 weeks_ahead=weeks_ahead,
                                 include_overdue=True,
-                                contact_name=contact_name
+                                contact_name=contact_name,
+                                date_type=date_type.lower()
                             )
                             
                             results.append({
@@ -969,7 +1001,7 @@ if ready_to_send and schedule_type == "Send Now":
                         })
         
         elif recipient_type == "custom":
-            # Send to custom recipients (existing logic)
+            # Send to custom recipients
             for idx, email in enumerate(custom_recipients):
                 progress = (idx + 1) / len(custom_recipients)
                 progress_bar.progress(progress)
@@ -980,8 +1012,8 @@ if ready_to_send and schedule_type == "Send Now":
                     
                     if notification_type == "📅 PO Schedule":
                         filters = {
-                            'etd_from': datetime.now().date(),
-                            'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                            f'{date_type.lower()}_from': datetime.now().date(),
+                            f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                         }
                         po_df = data_loader.load_po_data(filters)
                         
@@ -992,7 +1024,8 @@ if ready_to_send and schedule_type == "Send Now":
                                 po_df,
                                 cc_emails=cc_emails,
                                 is_custom_recipient=True,
-                                weeks_ahead=weeks_ahead
+                                weeks_ahead=weeks_ahead,
+                                date_type=date_type.lower()
                             )
                             
                             results.append({
@@ -1012,7 +1045,7 @@ if ready_to_send and schedule_type == "Send Now":
                             })
                     
                     elif notification_type == "🚨 Critical Alerts":
-                        overdue_pos = data_loader.get_overdue_pos()
+                        overdue_pos = data_loader.get_overdue_pos(date_type.lower())
                         pending_cans = data_loader.load_can_pending_data({'min_days_pending': 7})
                         
                         data_dict = {
@@ -1026,7 +1059,8 @@ if ready_to_send and schedule_type == "Send Now":
                                 recipient_name,
                                 data_dict,
                                 cc_emails=cc_emails,
-                                is_custom_recipient=True
+                                is_custom_recipient=True,
+                                date_type=date_type.lower()
                             )
                             
                             items_count = 0
@@ -1090,7 +1124,7 @@ if ready_to_send and schedule_type == "Send Now":
                     })
         
         else:  # creators
-            # Send to selected creators (existing logic)
+            # Send to selected creators
             for idx, creator_name in enumerate(selected_creators):
                 progress = (idx + 1) / len(selected_creators)
                 progress_bar.progress(progress)
@@ -1105,8 +1139,8 @@ if ready_to_send and schedule_type == "Send Now":
                     if notification_type == "📅 PO Schedule":
                         filters = {
                             'created_by': creator_info['email'],
-                            'etd_from': datetime.now().date(),
-                            'etd_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
+                            f'{date_type.lower()}_from': datetime.now().date(),
+                            f'{date_type.lower()}_to': datetime.now().date() + timedelta(weeks=weeks_ahead)
                         }
                         po_df = data_loader.load_po_data(filters)
                         
@@ -1135,7 +1169,8 @@ if ready_to_send and schedule_type == "Send Now":
                             creator_name,
                             po_df,
                             cc_emails=current_cc_emails,
-                            weeks_ahead=weeks_ahead
+                            weeks_ahead=weeks_ahead,
+                            date_type=date_type.lower()
                         )
                         
                         results.append({
@@ -1147,7 +1182,7 @@ if ready_to_send and schedule_type == "Send Now":
                         })
                     
                     elif notification_type == "🚨 Critical Alerts":
-                        overdue_pos = data_loader.get_overdue_pos_by_creator(creator_info['email'])
+                        overdue_pos = data_loader.get_overdue_pos_by_creator(creator_info['email'], date_type.lower())
                         pending_cans = data_loader.get_pending_cans_by_creator(creator_info['email'])
                         
                         data_dict = {
@@ -1161,7 +1196,8 @@ if ready_to_send and schedule_type == "Send Now":
                                 creator_info['email'],
                                 creator_name,
                                 data_dict,
-                                cc_emails=current_cc_emails
+                                cc_emails=current_cc_emails,
+                                date_type=date_type.lower()
                             )
                             
                             alert_count = 0
@@ -1255,7 +1291,7 @@ if ready_to_send and schedule_type == "Send Now":
 
 # Help section
 with st.expander("ℹ️ Help & Information"):
-    st.markdown("""
+    st.markdown(f"""
     ### How to use this page:
     
     1. **Select Notification Type**:
@@ -1267,32 +1303,38 @@ with st.expander("ℹ️ Help & Information"):
     2. **Select Time Period** (for PO Schedule & Custom Clearance):
        - Choose how many weeks ahead to include (1-8 weeks)
        - Default is 4 weeks
+       - **NEW: Select ETD or ETA** as the date basis
     
-    3. **Select Recipients**: 
+    3. **Date Type Selection** {'(NEW)' if date_type else ''}:
+       - **ETD**: Estimated Time of Departure - when goods leave the vendor
+       - **ETA**: Estimated Time of Arrival - when goods arrive at warehouse
+       - This affects how POs are filtered and sorted
+    
+    4. **Select Recipients**: 
        - **📝 PO Creators**: Send to PO creators
        - **🏢 Vendors**: Send to vendor contacts (two-step selection)
        - **✉️ Custom Recipients**: Enter any email addresses manually
        - For customs: Automatically sent to custom.clearance@prostech.vn
     
-    4. **Configure CC Settings**: 
+    5. **Configure CC Settings**: 
        - Include managers in CC for creators
        - Add additional CC recipients for any notification type
     
-    5. **Preview**: Check the email content before sending
-    6. **Send**: Confirm and send emails
+    6. **Preview**: Check the email content before sending
+    7. **Send**: Confirm and send emails
     
     ### Email Content by Type:
     
     #### 📅 PO Schedule:
-    - For creators: POs they created for selected weeks
-    - For vendors: All their POs (overdue + upcoming)
+    - For creators: POs they created for selected weeks (by ETD/ETA)
+    - For vendors: All their POs (overdue + upcoming) based on selected date
     - For custom recipients: All POs for selected weeks
     - Grouped by week and vendor
     - Excel attachment with full details
     - Calendar integration (.ics file)
     
     #### 🚨 Critical Alerts:
-    - For creators: Their overdue POs and pending CANs
+    - For creators: Their overdue POs (by ETD/ETA) and pending CANs
     - For custom recipients: All critical items
     - Not available for vendors
     - Sorted by urgency
@@ -1306,12 +1348,13 @@ with st.expander("ℹ️ Help & Information"):
     - Priority recommendations
     
     #### 🛃 Custom Clearance:
-    - International vendor POs only
+    - International vendor POs only (by ETD/ETA)
     - Grouped by country
     - Customs documentation checklist
     
     ### Notes:
     - Emails are sent from: inbound@prostech.vn
+    - Date filtering now supports both ETD and ETA
     - Vendor selection is a two-step process: select vendors first, then their contacts
     - Custom recipients receive general overview (not filtered by creator)
     - All emails can include additional CC recipients

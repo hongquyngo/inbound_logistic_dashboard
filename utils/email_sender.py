@@ -31,7 +31,8 @@ class InboundEmailSender:
     
     def send_po_schedule_email(self, recipient_email: str, recipient_name: str, 
                               po_df: pd.DataFrame, cc_emails: List[str] = None,
-                              is_custom_recipient: bool = False, weeks_ahead: int = 4) -> Tuple[bool, str]:
+                              is_custom_recipient: bool = False, weeks_ahead: int = 4,
+                              date_type: str = 'etd') -> Tuple[bool, str]:
         """Send PO schedule email to recipient"""
         try:
             if not self._validate_config():
@@ -45,11 +46,12 @@ class InboundEmailSender:
             # Create message
             msg = MIMEMultipart('alternative')
             
-            # Subject line with weeks
+            # Subject line with weeks and date type
+            date_type_upper = date_type.upper()
             if is_custom_recipient:
-                msg['Subject'] = f"Purchase Order Schedule - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} - Overview"
+                msg['Subject'] = f"Purchase Order Schedule - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} (by {date_type_upper}) - Overview"
             else:
-                msg['Subject'] = f"Your Purchase Order Schedule - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} - {recipient_name}"
+                msg['Subject'] = f"Your Purchase Order Schedule - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} (by {date_type_upper}) - {recipient_name}"
             
             msg['From'] = self.sender_email
             msg['To'] = recipient_email
@@ -59,7 +61,7 @@ class InboundEmailSender:
             
             # Create HTML content with error handling
             try:
-                html_content = self._create_po_schedule_html(po_df, recipient_name, is_custom_recipient, weeks_ahead)
+                html_content = self._create_po_schedule_html(po_df, recipient_name, is_custom_recipient, weeks_ahead, date_type)
                 html_part = MIMEText(html_content, 'html')
                 msg.attach(html_part)
             except Exception as e:
@@ -68,7 +70,7 @@ class InboundEmailSender:
             
             # Create Excel attachment with better error handling
             try:
-                excel_data = self._create_po_schedule_excel(po_df, is_custom_recipient)
+                excel_data = self._create_po_schedule_excel(po_df, is_custom_recipient, date_type)
                 if excel_data:
                     excel_part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                     excel_part.set_payload(excel_data.read())
@@ -86,7 +88,7 @@ class InboundEmailSender:
             # Create calendar attachment
             try:
                 calendar_gen = InboundCalendarGenerator()
-                ics_content = calendar_gen.create_po_schedule_ics(po_df, self.sender_email)
+                ics_content = calendar_gen.create_po_schedule_ics(po_df, self.sender_email, date_type)
                 
                 if ics_content:
                     ics_part = MIMEBase('text', 'calendar')
@@ -110,7 +112,8 @@ class InboundEmailSender:
     
     def send_critical_alerts_email(self, recipient_email: str, recipient_name: str,
                                   data_dict: Dict, cc_emails: List[str] = None,
-                                  is_custom_recipient: bool = False) -> Tuple[bool, str]:
+                                  is_custom_recipient: bool = False, 
+                                  date_type: str = 'etd') -> Tuple[bool, str]:
         """Send critical alerts email"""
         try:
             if not self._validate_config():
@@ -132,10 +135,11 @@ class InboundEmailSender:
             overdue_count = len(overdue_pos) if not overdue_pos.empty else 0
             pending_count = len(pending_stockin) if not pending_stockin.empty else 0
             
+            date_type_upper = date_type.upper()
             if is_custom_recipient:
-                msg['Subject'] = f"🚨 URGENT: {overdue_count} Overdue POs & {pending_count} Pending Stock-ins"
+                msg['Subject'] = f"🚨 URGENT: {overdue_count} Overdue POs (by {date_type_upper}) & {pending_count} Pending Stock-ins"
             else:
-                msg['Subject'] = f"🚨 URGENT: Your {overdue_count} Overdue POs & {pending_count} Pending Stock-ins"
+                msg['Subject'] = f"🚨 URGENT: Your {overdue_count} Overdue POs (by {date_type_upper}) & {pending_count} Pending Stock-ins"
             
             msg['From'] = self.sender_email
             msg['To'] = recipient_email
@@ -145,7 +149,7 @@ class InboundEmailSender:
             
             # Create HTML content
             try:
-                html_content = self._create_critical_alerts_html(data_dict, recipient_name, is_custom_recipient)
+                html_content = self._create_critical_alerts_html(data_dict, recipient_name, is_custom_recipient, date_type)
                 html_part = MIMEText(html_content, 'html')
                 msg.attach(html_part)
             except Exception as e:
@@ -154,7 +158,7 @@ class InboundEmailSender:
             
             # Create Excel attachment
             try:
-                excel_data = self._create_critical_alerts_excel(data_dict)
+                excel_data = self._create_critical_alerts_excel(data_dict, date_type)
                 if excel_data:
                     excel_part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                     excel_part.set_payload(excel_data.read())
@@ -172,7 +176,8 @@ class InboundEmailSender:
                 ics_content = calendar_gen.create_critical_alerts_ics(
                     overdue_pos, 
                     pending_stockin, 
-                    self.sender_email
+                    self.sender_email,
+                    date_type
                 )
                 
                 if ics_content:
@@ -272,7 +277,7 @@ class InboundEmailSender:
     
     def send_customs_clearance_email(self, recipient_email: str, po_df: pd.DataFrame,
                                     can_df: pd.DataFrame = None, cc_emails: List[str] = None, 
-                                    weeks_ahead: int = 4) -> Tuple[bool, str]:
+                                    weeks_ahead: int = 4, date_type: str = 'etd') -> Tuple[bool, str]:
         """Send international PO schedule and CAN arrivals to customs team"""
         try:
             if not self._validate_config():
@@ -297,7 +302,8 @@ class InboundEmailSender:
             if total_cans > 0:
                 subject_parts.append(f"{total_cans} Arrivals")
             
-            msg['Subject'] = f"🛃 International Shipments - {' & '.join(subject_parts)} from {countries} Countries - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''}"
+            date_type_upper = date_type.upper()
+            msg['Subject'] = f"🛃 International Shipments - {' & '.join(subject_parts)} from {countries} Countries - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} (by {date_type_upper})"
             msg['From'] = self.sender_email
             msg['To'] = recipient_email
             
@@ -306,7 +312,7 @@ class InboundEmailSender:
             
             # Create HTML content
             try:
-                html_content = self._create_customs_clearance_html(po_df, can_df, weeks_ahead)
+                html_content = self._create_customs_clearance_html(po_df, can_df, weeks_ahead, date_type)
                 html_part = MIMEText(html_content, 'html')
                 msg.attach(html_part)
             except Exception as e:
@@ -315,7 +321,7 @@ class InboundEmailSender:
             
             # Create Excel attachment
             try:
-                excel_data = self._create_customs_excel(po_df, can_df)
+                excel_data = self._create_customs_excel(po_df, can_df, date_type)
                 if excel_data:
                     excel_part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
                     excel_part.set_payload(excel_data.read())
@@ -334,7 +340,8 @@ class InboundEmailSender:
                     po_df,
                     can_df,
                     self.sender_email,
-                    weeks_ahead=weeks_ahead
+                    weeks_ahead=weeks_ahead,
+                    date_type=date_type
                 )
                 
                 if ics_content:
@@ -360,7 +367,7 @@ class InboundEmailSender:
     def send_vendor_po_schedule(self, vendor_email: str, vendor_name: str,
                             po_df: pd.DataFrame, cc_emails: List[str] = None,
                             weeks_ahead: int = 4, include_overdue: bool = True,
-                            contact_name: str = None) -> Tuple[bool, str]:
+                            contact_name: str = None, date_type: str = 'etd') -> Tuple[bool, str]:
         """Send PO schedule to vendor including overdue and upcoming POs"""
         try:
             if not self._validate_config():
@@ -370,11 +377,11 @@ class InboundEmailSender:
                 return False, "No PO data available"
             
             # Separate overdue and upcoming POs
-            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            po_df[date_type] = pd.to_datetime(po_df[date_type])
             today = datetime.now().date()
             
-            overdue_pos = po_df[po_df['etd'].dt.date < today] if include_overdue else pd.DataFrame()
-            upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+            overdue_pos = po_df[po_df[date_type].dt.date < today] if include_overdue else pd.DataFrame()
+            upcoming_pos = po_df[po_df[date_type].dt.date >= today]
             
             # Count statistics
             overdue_count = overdue_pos['po_number'].nunique() if not overdue_pos.empty else 0
@@ -383,13 +390,14 @@ class InboundEmailSender:
             # Create message
             msg = MIMEMultipart('alternative')
             
-            # Dynamic subject based on content
+            # Dynamic subject based on content and date type
+            date_type_upper = date_type.upper()
             if overdue_count > 0 and upcoming_count > 0:
-                msg['Subject'] = f"🚨 Purchase Order Update - {vendor_name} - {overdue_count} Overdue + {upcoming_count} Upcoming POs"
+                msg['Subject'] = f"🚨 Purchase Order Update - {vendor_name} - {overdue_count} Overdue + {upcoming_count} Upcoming POs (by {date_type_upper})"
             elif overdue_count > 0:
-                msg['Subject'] = f"🚨 URGENT: {overdue_count} Overdue Purchase Orders - {vendor_name}"
+                msg['Subject'] = f"🚨 URGENT: {overdue_count} Overdue Purchase Orders - {vendor_name} (by {date_type_upper})"
             else:
-                msg['Subject'] = f"Purchase Order Schedule - {vendor_name} - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''}"
+                msg['Subject'] = f"Purchase Order Schedule - {vendor_name} - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} (by {date_type_upper})"
             
             msg['From'] = self.sender_email
             msg['To'] = vendor_email
@@ -405,17 +413,19 @@ class InboundEmailSender:
                 include_overdue=include_overdue,
                 overdue_count=overdue_count,
                 upcoming_count=upcoming_count,
-                contact_name=contact_name
+                contact_name=contact_name,
+                date_type=date_type
             )
             html_part = MIMEText(html_content, 'html')
             msg.attach(html_part)
             
-            # CREATE AND ATTACH EXCEL FILE - ĐẢM BẢO PHẦN NÀY HOẠT ĐỘNG
+            # CREATE AND ATTACH EXCEL FILE
             try:
                 excel_data = self._create_vendor_po_excel(
                     po_df,
                     vendor_name,
-                    include_overdue=include_overdue
+                    include_overdue=include_overdue,
+                    date_type=date_type
                 )
                 if excel_data:
                     excel_part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -435,7 +445,7 @@ class InboundEmailSender:
             if not upcoming_pos.empty:
                 try:
                     calendar_gen = InboundCalendarGenerator()
-                    ics_content = calendar_gen.create_po_schedule_ics(upcoming_pos, self.sender_email)
+                    ics_content = calendar_gen.create_po_schedule_ics(upcoming_pos, self.sender_email, date_type)
                     
                     if ics_content:
                         ics_part = MIMEBase('text', 'calendar')
@@ -497,28 +507,30 @@ class InboundEmailSender:
             return False, str(e)
     
     def _create_po_schedule_html(self, po_df: pd.DataFrame, recipient_name: str, 
-                                is_custom_recipient: bool = False, weeks_ahead: int = 4) -> str:
+                                is_custom_recipient: bool = False, weeks_ahead: int = 4,
+                                date_type: str = 'etd') -> str:
         """Create HTML content for PO schedule email"""
         # Prepare data
-        po_df['etd'] = pd.to_datetime(po_df['etd'])
-        po_df['week_start'] = po_df['etd'] - pd.to_timedelta(po_df['etd'].dt.dayofweek, unit='D')
+        po_df[date_type] = pd.to_datetime(po_df[date_type])
+        po_df['week_start'] = po_df[date_type] - pd.to_timedelta(po_df[date_type].dt.dayofweek, unit='D')
         po_df['week_end'] = po_df['week_start'] + timedelta(days=6)
         po_df['week_key'] = po_df['week_start'].dt.strftime('%Y-%m-%d')
-        po_df['week'] = po_df['etd'].dt.isocalendar().week
+        po_df['week'] = po_df[date_type].dt.isocalendar().week
         
         # Calculate summary
         total_pos = po_df['po_number'].nunique()
         total_vendors = po_df['vendor_name'].nunique()
         total_value = po_df['outstanding_arrival_amount_usd'].sum()
-        overdue_pos = po_df[po_df['etd'].dt.date < datetime.now().date()]['po_number'].nunique()
+        overdue_pos = po_df[po_df[date_type].dt.date < datetime.now().date()]['po_number'].nunique()
         
         # Greeting based on recipient type
+        date_type_upper = date_type.upper()
         if is_custom_recipient:
             greeting = f"Dear {recipient_name},"
-            intro = f"Please find below the purchase order arrival schedule for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''}."
+            intro = f"Please find below the purchase order arrival schedule for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''} based on {date_type_upper}."
         else:
             greeting = f"Dear {recipient_name},"
-            intro = f"Please find below your purchase order arrival schedule for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''}. These are the POs you have created that are expected to arrive soon."
+            intro = f"Please find below your purchase order arrival schedule for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''} based on {date_type_upper}. These are the POs you have created that are expected to arrive soon."
         
         html = f"""
         <!DOCTYPE html>
@@ -598,7 +610,7 @@ class InboundEmailSender:
         <body>
             <div class="header">
                 <h1>📦 Purchase Order Schedule</h1>
-                <p>Upcoming Arrivals - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''}</p>
+                <p>Upcoming Arrivals - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} (by {date_type_upper})</p>
             </div>
             
             <div class="content">
@@ -644,7 +656,7 @@ class InboundEmailSender:
                                     <tr>
                                         <td align="center" style="padding: 15px;">
                                             <div style="font-size: 28px; font-weight: bold; color: #d32f2f;">{overdue_pos}</div>
-                                            <div style="font-size: 14px; color: #666; margin-top: 5px;">Overdue POs</div>
+                                            <div style="font-size: 14px; color: #666; margin-top: 5px;">Overdue POs ({date_type_upper})</div>
                                         </td>
                                     </tr>
                                 </table>
@@ -658,7 +670,7 @@ class InboundEmailSender:
         if overdue_pos > 0:
             html += f"""
                 <div class="warning">
-                    <strong>⚠️ Attention:</strong> {overdue_pos} purchase orders are overdue. 
+                    <strong>⚠️ Attention:</strong> {overdue_pos} purchase orders are overdue based on {date_type_upper}. 
                     Please follow up with vendors immediately.
                 </div>
             """
@@ -684,7 +696,7 @@ class InboundEmailSender:
                     </div>
                     <table>
                         <tr>
-                            <th width="90">ETD</th>
+                            <th width="90">{date_type_upper}</th>
                             <th width="100">PO Number</th>
                             <th width="180">Vendor</th>
                             <th width="80">PT Code</th>
@@ -695,15 +707,15 @@ class InboundEmailSender:
                         </tr>
             """
             
-            # Sort by ETD and vendor
-            week_sorted = week_df.sort_values(['etd', 'vendor_name', 'po_number'])
+            # Sort by date and vendor
+            week_sorted = week_df.sort_values([date_type, 'vendor_name', 'po_number'])
             
             for _, row in week_sorted.iterrows():
-                etd_class = 'overdue' if row['etd'].date() < datetime.now().date() else ''
+                date_class = 'overdue' if row[date_type].date() < datetime.now().date() else ''
                 
                 html += f"""
                         <tr>
-                            <td class="{etd_class}">{row['etd'].strftime('%b %d')}</td>
+                            <td class="{date_class}">{row[date_type].strftime('%b %d')}</td>
                             <td>{row['po_number']}</td>
                             <td>{row['vendor_name']}</td>
                             <td>{row['pt_code']}</td>
@@ -722,8 +734,8 @@ class InboundEmailSender:
         # Add calendar buttons
         try:
             calendar_gen = InboundCalendarGenerator()
-            google_cal_links = calendar_gen.create_google_calendar_links(po_df)
-            outlook_cal_links = calendar_gen.create_outlook_calendar_links(po_df)
+            google_cal_links = calendar_gen.create_google_calendar_links(po_df, date_type)
+            outlook_cal_links = calendar_gen.create_outlook_calendar_links(po_df, date_type)
         except Exception as e:
             logger.warning(f"Error creating calendar links: {e}")
             google_cal_links = None
@@ -731,10 +743,10 @@ class InboundEmailSender:
         
         # Show calendar links only if available
         if google_cal_links and outlook_cal_links:
-            html += """
+            html += f"""
                 <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
                     <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
-                    <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
+                    <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates (by {date_type_upper}) to your calendar:</p>
                     
                     <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             """
@@ -778,11 +790,11 @@ class InboundEmailSender:
             """
         
         # Add action items
-        html += """
+        html += f"""
             <div style="margin-top: 20px; padding: 15px; background-color: #e3f2fd; border-radius: 5px;">
                 <h4>📋 Action Items:</h4>
                 <ul>
-                    <li>Review and confirm ETDs with vendors</li>
+                    <li>Review and confirm {date_type_upper}s with vendors</li>
                     <li>Prepare warehouse space for incoming goods</li>
                     <li>Ensure all import documentation is ready</li>
                     <li>Coordinate quality inspection schedules</li>
@@ -801,19 +813,19 @@ class InboundEmailSender:
         return html
     
     # Excel creation methods
-    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False) -> Optional[io.BytesIO]:
+    def _create_po_schedule_excel(self, po_df: pd.DataFrame, is_custom_recipient: bool = False, 
+                                  date_type: str = 'etd') -> Optional[io.BytesIO]:
         """Create Excel attachment for PO schedule with better error handling"""
         output = io.BytesIO()
         
         try:
-            # Validate input
             if po_df is None or po_df.empty:
                 logger.warning("Empty DataFrame provided to create Excel")
                 return None
             
             # Check for required columns
             required_cols = ['vendor_name', 'po_number', 'pending_standard_arrival_quantity', 
-                           'outstanding_arrival_amount_usd', 'etd']
+                           'outstanding_arrival_amount_usd', date_type]
             
             missing_cols = [col for col in required_cols if col not in po_df.columns]
             if missing_cols:
@@ -836,14 +848,14 @@ class InboundEmailSender:
                     vendor_summary.columns = ['Vendor', 'PO Count', 'Pending Quantity', 'Outstanding Value USD']
                     vendor_summary.to_excel(writer, sheet_name='Vendor Summary', index=False)
                 
-                # Sheet 3: Weekly Timeline (only if etd exists)
-                if 'etd' in po_df.columns:
+                # Sheet 3: Weekly Timeline (only if date column exists)
+                if date_type in po_df.columns:
                     po_df_copy = po_df.copy()
-                    po_df_copy['etd'] = pd.to_datetime(po_df_copy['etd'], errors='coerce')
-                    po_df_copy = po_df_copy.dropna(subset=['etd'])  # Remove invalid dates
+                    po_df_copy[date_type] = pd.to_datetime(po_df_copy[date_type], errors='coerce')
+                    po_df_copy = po_df_copy.dropna(subset=[date_type])  # Remove invalid dates
                     
                     if not po_df_copy.empty:
-                        po_df_copy['week'] = po_df_copy['etd'].dt.to_period('W').dt.start_time
+                        po_df_copy['week'] = po_df_copy[date_type].dt.to_period('W').dt.start_time
                         
                         # Check which columns are available for aggregation
                         agg_dict = {}
@@ -891,7 +903,7 @@ class InboundEmailSender:
             logger.error(f"Error creating PO schedule Excel: {e}", exc_info=True)
             return None
     
-    def _create_critical_alerts_excel(self, data_dict: Dict) -> Optional[io.BytesIO]:
+    def _create_critical_alerts_excel(self, data_dict: Dict, date_type: str = 'etd') -> Optional[io.BytesIO]:
         """Create Excel attachment for critical alerts"""
         output = io.BytesIO()
         
@@ -899,7 +911,11 @@ class InboundEmailSender:
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 # Sheet 1: Overdue POs
                 if 'overdue_pos' in data_dict and not data_dict['overdue_pos'].empty:
-                    data_dict['overdue_pos'].to_excel(writer, sheet_name='Overdue POs', index=False)
+                    # Rename column if it exists
+                    overdue_df = data_dict['overdue_pos'].copy()
+                    if f'original_{date_type}' in overdue_df.columns:
+                        overdue_df = overdue_df.rename(columns={f'original_{date_type}': f'{date_type.upper()}'})
+                    overdue_df.to_excel(writer, sheet_name=f'Overdue POs ({date_type.upper()})', index=False)
                 
                 # Sheet 2: Pending Stock-in
                 if 'pending_stockin' in data_dict and not data_dict['pending_stockin'].empty:
@@ -988,7 +1004,8 @@ class InboundEmailSender:
             logger.error(f"Error creating pending stock-in Excel: {e}", exc_info=True)
             return None
     
-    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None) -> Optional[io.BytesIO]:
+    def _create_customs_excel(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None,
+                              date_type: str = 'etd') -> Optional[io.BytesIO]:
         """Create Excel for customs clearance"""
         output = io.BytesIO()
         
@@ -1007,7 +1024,7 @@ class InboundEmailSender:
                 
                 # Sheet 2: PO Details
                 if not po_df.empty:
-                    po_df.to_excel(writer, sheet_name='PO Details', index=False)
+                    po_df.to_excel(writer, sheet_name=f'PO Details ({date_type.upper()})', index=False)
                 
                 # Sheet 3: CAN Arrivals
                 if can_df is not None and not can_df.empty:
@@ -1028,11 +1045,11 @@ class InboundEmailSender:
                 
                 # Add PO data to timeline
                 if not po_df.empty:
-                    po_timeline = po_df.groupby(['etd', 'vendor_country_name']).agg({
+                    po_timeline = po_df.groupby([date_type, 'vendor_country_name']).agg({
                         'po_number': 'nunique',
                         'outstanding_arrival_amount_usd': 'sum'
                     }).reset_index()
-                    po_timeline['Type'] = 'PO ETD'
+                    po_timeline['Type'] = f'PO {date_type.upper()}'
                     po_timeline.columns = ['Date', 'Country', 'Count', 'Value USD', 'Type']
                     timeline_data.append(po_timeline)
                 
@@ -1075,7 +1092,7 @@ class InboundEmailSender:
     
 
     def _create_vendor_po_excel(self, po_df: pd.DataFrame, vendor_name: str, 
-                            include_overdue: bool = True) -> Optional[io.BytesIO]:
+                            include_overdue: bool = True, date_type: str = 'etd') -> Optional[io.BytesIO]:
         """Create Excel attachment for vendor with separate sheets for overdue and upcoming"""
         output = io.BytesIO()
         
@@ -1087,11 +1104,11 @@ class InboundEmailSender:
             po_df = po_df.copy()
             
             # Separate overdue and upcoming
-            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            po_df[date_type] = pd.to_datetime(po_df[date_type])
             today = datetime.now().date()
             
-            overdue_pos = po_df[po_df['etd'].dt.date < today].copy() if include_overdue else pd.DataFrame()
-            upcoming_pos = po_df[po_df['etd'].dt.date >= today].copy()
+            overdue_pos = po_df[po_df[date_type].dt.date < today].copy() if include_overdue else pd.DataFrame()
+            upcoming_pos = po_df[po_df[date_type].dt.date >= today].copy()
             
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 # Sheet 1: Summary
@@ -1112,19 +1129,19 @@ class InboundEmailSender:
                 
                 # Sheet 2: Overdue POs (if any)
                 if include_overdue and not overdue_pos.empty:
-                    # FIX: Tính days_overdue đúng cách
-                    overdue_pos['days_overdue'] = overdue_pos['etd'].apply(
+                    # Calculate days_overdue
+                    overdue_pos['days_overdue'] = overdue_pos[date_type].apply(
                         lambda x: (today - x.date()).days
                     )
                     overdue_pos = overdue_pos.sort_values('days_overdue', ascending=False)
                     
-                    # Select relevant columns - kiểm tra columns tồn tại
+                    # Select relevant columns
                     overdue_columns = []
                     column_mapping = {}
                     
-                    if 'etd' in overdue_pos.columns:
-                        overdue_columns.append('etd')
-                        column_mapping['etd'] = 'ETD'
+                    if date_type in overdue_pos.columns:
+                        overdue_columns.append(date_type)
+                        column_mapping[date_type] = date_type.upper()
                     
                     if 'days_overdue' in overdue_pos.columns:
                         overdue_columns.append('days_overdue')
@@ -1160,27 +1177,27 @@ class InboundEmailSender:
                     
                     overdue_export = overdue_pos[overdue_columns].copy()
                     overdue_export.rename(columns=column_mapping, inplace=True)
-                    overdue_export.to_excel(writer, sheet_name='Overdue POs', index=False)
+                    overdue_export.to_excel(writer, sheet_name=f'Overdue POs ({date_type.upper()})', index=False)
                 
                 # Sheet 3: Upcoming POs
                 if not upcoming_pos.empty:
-                    # FIX: Tính days_until_etd đúng cách
-                    upcoming_pos['days_until_etd'] = upcoming_pos['etd'].apply(
+                    # Calculate days_until_etd/eta
+                    upcoming_pos['days_until_date'] = upcoming_pos[date_type].apply(
                         lambda x: (x.date() - today).days
                     )
-                    upcoming_pos = upcoming_pos.sort_values('etd')
+                    upcoming_pos = upcoming_pos.sort_values(date_type)
                     
-                    # Select relevant columns - kiểm tra columns tồn tại
+                    # Select relevant columns
                     upcoming_columns = []
                     column_mapping = {}
                     
-                    if 'etd' in upcoming_pos.columns:
-                        upcoming_columns.append('etd')
-                        column_mapping['etd'] = 'ETD'
+                    if date_type in upcoming_pos.columns:
+                        upcoming_columns.append(date_type)
+                        column_mapping[date_type] = date_type.upper()
                     
-                    if 'days_until_etd' in upcoming_pos.columns:
-                        upcoming_columns.append('days_until_etd')
-                        column_mapping['days_until_etd'] = 'Days Until ETD'
+                    if 'days_until_date' in upcoming_pos.columns:
+                        upcoming_columns.append('days_until_date')
+                        column_mapping['days_until_date'] = f'Days Until {date_type.upper()}'
                     
                     if 'po_number' in upcoming_pos.columns:
                         upcoming_columns.append('po_number')
@@ -1212,7 +1229,7 @@ class InboundEmailSender:
                     
                     upcoming_export = upcoming_pos[upcoming_columns].copy()
                     upcoming_export.rename(columns=column_mapping, inplace=True)
-                    upcoming_export.to_excel(writer, sheet_name='Upcoming POs', index=False)
+                    upcoming_export.to_excel(writer, sheet_name=f'Upcoming POs ({date_type.upper()})', index=False)
                 
                 # Sheet 4: All PO Details
                 all_columns = []
@@ -1222,8 +1239,7 @@ class InboundEmailSender:
                 available_columns = {
                     'po_number': 'PO Number',
                     'po_date': 'PO Date',
-                    'etd': 'ETD',
-                    'eta': 'ETA',
+                    date_type: date_type.upper(),
                     'vendor_name': 'Vendor',
                     'product_name': 'Product',
                     'pt_code': 'PT Code',
@@ -1234,6 +1250,12 @@ class InboundEmailSender:
                     'trade_term': 'Trade Terms',
                     'status': 'Status'
                 }
+                
+                # Add ETA if we're using ETD and vice versa
+                if date_type == 'etd' and 'eta' in po_df.columns:
+                    available_columns['eta'] = 'ETA'
+                elif date_type == 'eta' and 'etd' in po_df.columns:
+                    available_columns['etd'] = 'ETD'
                 
                 for col, display_name in available_columns.items():
                     if col in po_df.columns:
@@ -1270,7 +1292,7 @@ class InboundEmailSender:
 
 
     def _create_critical_alerts_html(self, data_dict: Dict, recipient_name: str,
-                                    is_custom_recipient: bool = False) -> str:
+                                    is_custom_recipient: bool = False, date_type: str = 'etd') -> str:
         """Create HTML content for critical alerts email"""
         overdue_pos = data_dict.get('overdue_pos', pd.DataFrame())
         pending_stockin = data_dict.get('pending_stockin', pd.DataFrame())
@@ -1282,6 +1304,7 @@ class InboundEmailSender:
         max_days_pending = pending_stockin['days_since_arrival'].max() if not pending_stockin.empty else 0
         
         # Greeting based on recipient type
+        date_type_upper = date_type.upper()
         if is_custom_recipient:
             greeting = f"Dear {recipient_name},"
             intro = "The following items require immediate attention:"
@@ -1375,7 +1398,7 @@ class InboundEmailSender:
                 <div class="alert-box">
                     <strong>⚠️ CRITICAL ISSUES DETECTED:</strong><br>
                     {intro}<br>
-                    • {total_overdue} Overdue Purchase Orders<br>
+                    • {total_overdue} Overdue Purchase Orders (by {date_type_upper})<br>
                     • {total_pending} Items Pending Stock-in > 7 days
                 </div>
                 
@@ -1386,7 +1409,7 @@ class InboundEmailSender:
                                 <tr>
                                     <td align="center" style="padding: 15px;">
                                         <div style="font-size: 32px; font-weight: bold; color: #d32f2f;">{total_overdue}</div>
-                                        <div style="font-size: 14px; color: #666; margin-top: 5px;">Overdue POs</div>
+                                        <div style="font-size: 14px; color: #666; margin-top: 5px;">Overdue POs ({date_type_upper})</div>
                                     </td>
                                 </tr>
                             </table>
@@ -1427,14 +1450,14 @@ class InboundEmailSender:
         
         # Overdue POs Section
         if not overdue_pos.empty:
-            html += """
-                <div class="section-header">🔴 OVERDUE PURCHASE ORDERS</div>
-                <p>These POs have passed their ETD and require immediate vendor follow-up:</p>
+            html += f"""
+                <div class="section-header">🔴 OVERDUE PURCHASE ORDERS (by {date_type_upper})</div>
+                <p>These POs have passed their {date_type_upper} and require immediate vendor follow-up:</p>
                 <table>
                     <tr>
                         <th width="100">PO Number</th>
                         <th width="180">Vendor</th>
-                        <th width="90">Original ETD</th>
+                        <th width="90">Original {date_type_upper}</th>
                         <th width="80">Days Overdue</th>
                         <th width="120">Products</th>
                         <th width="100">Value (USD)</th>
@@ -1442,11 +1465,14 @@ class InboundEmailSender:
             """
             
             for _, row in overdue_pos.iterrows():
+                # Get the date column name
+                date_col = f'original_{date_type}' if f'original_{date_type}' in row else date_type
+                
                 html += f"""
                     <tr class="overdue-row">
                         <td>{row['po_number']}</td>
                         <td>{row['vendor_name']}</td>
-                        <td>{row['original_etd']}</td>
+                        <td>{row[date_col] if date_col in row else 'N/A'}</td>
                         <td class="days-overdue">{row['days_overdue']} days</td>
                         <td>{str(row['products'])[:50]}...</td>
                         <td>${row['outstanding_value']:,.0f}</td>
@@ -1487,11 +1513,11 @@ class InboundEmailSender:
             html += "</table>"
         
         # Action Items
-        html += """
+        html += f"""
             <div class="action-box">
                 <h4>📋 Required Actions:</h4>
                 <ol>
-                    <li><strong>Overdue POs:</strong> Contact vendors immediately for updated ETDs</li>
+                    <li><strong>Overdue POs:</strong> Contact vendors immediately for updated {date_type_upper}s</li>
                     <li><strong>Pending Stock-in:</strong> Prioritize warehouse processing for aged items</li>
                     <li><strong>Escalation:</strong> Items overdue > 14 days should be escalated to management</li>
                 </ol>
@@ -1718,11 +1744,11 @@ class InboundEmailSender:
         return html
     
     def _create_customs_clearance_html(self, po_df: pd.DataFrame, can_df: pd.DataFrame = None, 
-                                       weeks_ahead: int = 4) -> str:
+                                       weeks_ahead: int = 4, date_type: str = 'etd') -> str:
         """Create HTML for customs clearance email"""
         # Process PO data
         if not po_df.empty:
-            po_df['etd'] = pd.to_datetime(po_df['etd'])
+            po_df[date_type] = pd.to_datetime(po_df[date_type])
         
         # Process CAN data
         if can_df is not None and not can_df.empty:
@@ -1745,6 +1771,7 @@ class InboundEmailSender:
                 countries = can_countries
         
         total_value = po_value + can_value
+        date_type_upper = date_type.upper()
         
         html = f"""
         <!DOCTYPE html>
@@ -1847,12 +1874,12 @@ class InboundEmailSender:
         <body>
             <div class="header">
                 <h1>🛃 International Shipments</h1>
-                <p>Customs Clearance Schedule & Arrivals</p>
+                <p>Customs Clearance Schedule & Arrivals (by {date_type_upper})</p>
             </div>
             
             <div class="content">
                 <p>Dear Customs Clearance Team,</p>
-                <p>Please find below the international shipments requiring customs clearance for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''}.</p>
+                <p>Please find below the international shipments requiring customs clearance for the next {weeks_ahead} week{'s' if weeks_ahead > 1 else ''} based on {date_type_upper}.</p>
                 
                 <div class="summary-section">
                     <h3>📊 Summary Overview</h3>
@@ -1903,11 +1930,11 @@ class InboundEmailSender:
                 </div>
         """
         
-        # Section 1: PO ETD Schedule
+        # Section 1: PO Schedule
         if not po_df.empty:
-            html += """
+            html += f"""
                 <div class="section-divider">
-                    <h2>📅 Purchase Order ETD Schedule</h2>
+                    <h2>📅 Purchase Order {date_type_upper} Schedule</h2>
                 </div>
             """
             
@@ -1923,7 +1950,7 @@ class InboundEmailSender:
                         </div>
                         <table>
                             <tr>
-                                <th>ETD</th>
+                                <th>{date_type_upper}</th>
                                 <th>PO Number</th>
                                 <th>Vendor</th>
                                 <th>PT Code</th>
@@ -1934,13 +1961,13 @@ class InboundEmailSender:
                             </tr>
                 """
                 
-                # Sort by ETD
-                country_sorted = country_df.sort_values(['etd', 'po_number'])
+                # Sort by date
+                country_sorted = country_df.sort_values([date_type, 'po_number'])
                 
                 for _, row in country_sorted.iterrows():
                     html += f"""
                             <tr>
-                                <td>{row['etd'].strftime('%b %d')}</td>
+                                <td>{row[date_type].strftime('%b %d')}</td>
                                 <td>{row['po_number']}</td>
                                 <td>{row['vendor_name']}</td>
                                 <td>{row['pt_code']}</td>
@@ -2023,8 +2050,8 @@ class InboundEmailSender:
         # Add calendar information with links
         try:
             calendar_gen = InboundCalendarGenerator()
-            google_links = calendar_gen.create_customs_google_calendar_links(po_df, can_df)
-            outlook_links = calendar_gen.create_customs_outlook_calendar_links(po_df, can_df)
+            google_links = calendar_gen.create_customs_google_calendar_links(po_df, can_df, date_type)
+            outlook_links = calendar_gen.create_customs_outlook_calendar_links(po_df, can_df, date_type)
         except Exception as e:
             logger.warning(f"Error creating calendar links: {e}")
             google_links = None
@@ -2047,7 +2074,7 @@ class InboundEmailSender:
                 country = g_link['country']
                 
                 type_emoji = "📅" if event_type == "PO" else "📦"
-                type_text = "PO ETD" if event_type == "PO" else "CAN Arrival"
+                type_text = f"PO {date_type_upper}" if event_type == "PO" else "CAN Arrival"
                 
                 html += f"""
                         <div style="margin: 15px 0; padding: 10px 0; border-bottom: 1px solid #eee;">
@@ -2082,11 +2109,11 @@ class InboundEmailSender:
                         </div>
                 """
             
-            html += """
+            html += f"""
                         <div style="margin-top: 20px; padding: 15px; background-color: #e0f2f1; border-radius: 5px;">
                             <p style="margin: 0 0 10px 0;"><strong>Event Types:</strong></p>
                             <ul style="margin: 0; padding-left: 20px;">
-                                <li style="margin-bottom: 5px;">📅 PO ETD - Morning events (8:00 AM - 12:00 PM)</li>
+                                <li style="margin-bottom: 5px;">📅 PO {date_type_upper} - Morning events (8:00 AM - 12:00 PM)</li>
                                 <li style="margin-bottom: 5px;">📦 CAN Arrivals - Afternoon events (2:00 PM - 4:00 PM)</li>
                                 <li>⏰ Reminders set 1 day before for preparation</li>
                             </ul>
@@ -2154,15 +2181,15 @@ class InboundEmailSender:
     def _create_vendor_po_schedule_html(self, po_df: pd.DataFrame, vendor_name: str, 
                                 weeks_ahead: int = 4, include_overdue: bool = True,
                                 overdue_count: int = 0, upcoming_count: int = 0,
-                                contact_name: str = None) -> str:
+                                contact_name: str = None, date_type: str = 'etd') -> str:
         """Create HTML content specifically for vendors with overdue and upcoming sections"""
         # Process data
-        po_df['etd'] = pd.to_datetime(po_df['etd'])
+        po_df[date_type] = pd.to_datetime(po_df[date_type])
         today = datetime.now().date()
         
         # Separate overdue and upcoming
-        overdue_pos = po_df[po_df['etd'].dt.date < today] if include_overdue else pd.DataFrame()
-        upcoming_pos = po_df[po_df['etd'].dt.date >= today]
+        overdue_pos = po_df[po_df[date_type].dt.date < today] if include_overdue else pd.DataFrame()
+        upcoming_pos = po_df[po_df[date_type].dt.date >= today]
         
         # Calculate totals
         total_pos = po_df['po_number'].nunique()
@@ -2175,7 +2202,9 @@ class InboundEmailSender:
         else:
             greeting = f"Dear {vendor_name} Team,"
         
-        # KHỞI TẠO BIẾN HTML - PHẦN NÀY BỊ THIẾU
+        date_type_upper = date_type.upper()
+        
+        # KHỞI TẠO BIẾN HTML
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -2258,7 +2287,7 @@ class InboundEmailSender:
         <body>
             <div class="header">
                 <h1>📦 Purchase Order Schedule</h1>
-                <p>Delivery Schedule for {vendor_name}</p>
+                <p>Delivery Schedule for {vendor_name} (by {date_type_upper})</p>
             </div>
             
             <div class="content">
@@ -2275,7 +2304,7 @@ class InboundEmailSender:
                             </td>
                             <td width="25%" align="center" style="padding: 15px;">
                                 <div style="font-size: 24px; font-weight: bold; color: #d32f2f;">{overdue_count}</div>
-                                <div style="font-size: 14px; color: #666;">Overdue POs</div>
+                                <div style="font-size: 14px; color: #666;">Overdue POs ({date_type_upper})</div>
                             </td>
                             <td width="25%" align="center" style="padding: 15px;">
                                 <div style="font-size: 24px; font-weight: bold; color: #2e7d32;">{upcoming_count}</div>
@@ -2300,11 +2329,11 @@ class InboundEmailSender:
                         🚨 OVERDUE PURCHASE ORDERS ({overdue_count} POs, ${overdue_value:,.0f})
                     </div>
                     <p style="color: #d32f2f; margin: 10px 0;">
-                        The following purchase orders have passed their ETD. Please update us on their status immediately.
+                        The following purchase orders have passed their {date_type_upper}. Please update us on their status immediately.
                     </p>
                     <table>
                         <tr>
-                            <th>ETD</th>
+                            <th>{date_type_upper}</th>
                             <th>Days Overdue</th>
                             <th>PO Number</th>
                             <th>PT Code</th>
@@ -2317,7 +2346,7 @@ class InboundEmailSender:
             
             # Sort by days overdue (most overdue first)
             overdue_sorted = overdue_pos.copy()
-            overdue_sorted['days_overdue'] = overdue_sorted['etd'].apply(
+            overdue_sorted['days_overdue'] = overdue_sorted[date_type].apply(
                 lambda x: (today - x.date()).days
             )
             overdue_sorted = overdue_sorted.sort_values('days_overdue', ascending=False)
@@ -2327,7 +2356,7 @@ class InboundEmailSender:
                 
                 html += f"""
                         <tr>
-                            <td class="overdue">{row['etd'].strftime('%b %d, %Y')}</td>
+                            <td class="overdue">{row[date_type].strftime('%b %d, %Y')}</td>
                             <td class="overdue">{days_overdue} days</td>
                             <td>{row['po_number']}</td>
                             <td>{row['pt_code']}</td>
@@ -2338,10 +2367,10 @@ class InboundEmailSender:
                         </tr>
                 """
             
-            html += """
+            html += f"""
                     </table>
                     <p style="margin-top: 15px; font-weight: bold; color: #d32f2f;">
-                        ⚠️ Action Required: Please provide updated ETDs and shipment status for all overdue items.
+                        ⚠️ Action Required: Please provide updated {date_type_upper}s and shipment status for all overdue items.
                     </p>
                 </div>
             """
@@ -2357,8 +2386,8 @@ class InboundEmailSender:
                     </div>
                     <table>
                         <tr>
-                            <th>ETD</th>
-                            <th>Days Until ETD</th>
+                            <th>{date_type_upper}</th>
+                            <th>Days Until {date_type_upper}</th>
                             <th>PO Number</th>
                             <th>PT Code</th>
                             <th>Product</th>
@@ -2368,15 +2397,15 @@ class InboundEmailSender:
                         </tr>
             """
             
-            # Sort by ETD (nearest first)
-            upcoming_sorted = upcoming_pos.sort_values('etd')
+            # Sort by date (nearest first)
+            upcoming_sorted = upcoming_pos.sort_values(date_type)
             
             for _, row in upcoming_sorted.iterrows():
-                days_until = (row['etd'].date() - today).days
+                days_until = (row[date_type].date() - today).days
                 
                 html += f"""
                         <tr>
-                            <td>{row['etd'].strftime('%b %d, %Y')}</td>
+                            <td>{row[date_type].strftime('%b %d, %Y')}</td>
                             <td>{days_until} days</td>
                             <td>{row['po_number']}</td>
                             <td>{row['pt_code']}</td>
@@ -2391,13 +2420,12 @@ class InboundEmailSender:
                     </table>
                 </div>
             """
-        # THÊM GOOGLE CALENDAR LINKS Ở ĐÂY - SAU UPCOMING SECTION
-        # Add calendar buttons
+        # Add Google Calendar links
         if not upcoming_pos.empty:
             try:
                 calendar_gen = InboundCalendarGenerator()
-                google_cal_links = calendar_gen.create_google_calendar_links(upcoming_pos)
-                outlook_cal_links = calendar_gen.create_outlook_calendar_links(upcoming_pos)
+                google_cal_links = calendar_gen.create_google_calendar_links(upcoming_pos, date_type)
+                outlook_cal_links = calendar_gen.create_outlook_calendar_links(upcoming_pos, date_type)
             except Exception as e:
                 logger.warning(f"Error creating calendar links: {e}")
                 google_cal_links = None
@@ -2405,10 +2433,10 @@ class InboundEmailSender:
             
             # Show calendar links only if available
             if google_cal_links and outlook_cal_links:
-                html += """
+                html += f"""
                     <div style="margin: 40px 0; border: 1px solid #ddd; border-radius: 8px; padding: 25px; background-color: #fafafa;">
                         <h3 style="margin-top: 0; color: #333;">📅 Add to Your Calendar</h3>
-                        <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates to your calendar:</p>
+                        <p style="color: #666; margin-bottom: 25px;">Click below to add individual PO arrival dates (by {date_type_upper}) to your calendar:</p>
                         
                         <div style="background-color: white; padding: 20px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                 """
@@ -2454,14 +2482,14 @@ class InboundEmailSender:
 
 
         # Add important reminders
-        html += """
+        html += f"""
                 <div style="margin-top: 30px; padding: 15px; background-color: #e3f2fd; border-radius: 5px;">
                     <h4>📋 Important Reminders:</h4>
                     <ul>
-                        <li><strong>Overdue POs:</strong> Please update ETDs and provide shipping status immediately</li>
+                        <li><strong>Overdue POs:</strong> Please update {date_type_upper}s and provide shipping status immediately</li>
                         <li><strong>Documentation:</strong> Ensure all shipping documents are prepared in advance</li>
                         <li><strong>Quality Certificates:</strong> Must accompany each shipment</li>
-                        <li><strong>ETD Changes:</strong> Notify us at least 3 days before original ETD</li>
+                        <li><strong>{date_type_upper} Changes:</strong> Notify us at least 3 days before original {date_type_upper}</li>
                         <li><strong>Contact:</strong> For any questions, reach our procurement team</li>
                     </ul>
                 </div>
@@ -2477,5 +2505,3 @@ class InboundEmailSender:
         """
         
         return html
-
-
