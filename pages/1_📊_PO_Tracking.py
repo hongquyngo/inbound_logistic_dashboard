@@ -114,7 +114,7 @@ with st.expander("🔍 Filters", expanded=True):
             options=vendor_category_options,
             default=None,
             placeholder="All categories",
-            help="Internal: Company vendors | External: Third-party vendors"
+            help="Internal: Vendor companies under PTH | External: Not under PTH"
         )
         
         # Vendor Location filter (NEW - vendor_location_type)
@@ -371,7 +371,7 @@ if po_df is not None and not po_df.empty:
                 
                 styled_df = pivot_df.style.format(format_dict)
                 styled_df = styled_df.apply(highlight_vendor_location, axis=1)
-                styled_df = styled_df.applymap(highlight_completion, subset=['Avg Completion %'])
+                styled_df = styled_df.map(highlight_completion, subset=['Avg Completion %'])
                 styled_df = styled_df.background_gradient(subset=['Outstanding USD'], cmap='Reds')
                 
                 st.dataframe(styled_df, use_container_width=True, height=600)
@@ -413,6 +413,7 @@ if po_df is not None and not po_df.empty:
             )
         else:
             st.info(f"No data available for {view_period} pivot view")
+
 
     with tab3:
         # Analytics
@@ -620,10 +621,14 @@ if po_df is not None and not po_df.empty:
                 display_cols = ['pt_code', 'product', 'total_demand', 'current_stock', 
                               'incoming_supply', 'total_available', 'net_requirement',
                               'current_coverage_percent', 'total_coverage_percent', 
-                              'next_arrival_date', 'supply_status']
+                              'next_arrival_date_eta', 'supply_status']
+                
+                # Rename column for display
+                shortage_df_display = shortage_df[display_cols].copy()
+                shortage_df_display.rename(columns={'next_arrival_date_eta': 'Next Arrival (ETA)'}, inplace=True)
                 
                 st.dataframe(
-                    shortage_df[display_cols].style.format({
+                    shortage_df_display.style.format({
                         'total_demand': '{:,.0f}',
                         'current_stock': '{:,.0f}',
                         'incoming_supply': '{:,.0f}',
@@ -633,12 +638,12 @@ if po_df is not None and not po_df.empty:
                         'total_coverage_percent': '{:.1f}%'
                     }).background_gradient(subset=['total_coverage_percent'], cmap='RdYlGn')
                     .apply(lambda x: ['background-color: #ffcccb' if v == 'Need to Order' 
-                                     else 'background-color: #ffe4b5' if v == 'Partial Coverage'
-                                     else 'background-color: #90ee90' if v == 'Will be Sufficient'
-                                     else '' for v in x], subset=['supply_status']),
+                                    else 'background-color: #ffe4b5' if v == 'Partial Coverage'
+                                    else 'background-color: #90ee90' if v == 'Will be Sufficient'
+                                    else '' for v in x], subset=['supply_status']),
                     use_container_width=True
                 )
-                
+                    
                 st.caption("""
                 **Legend:**
                 - **Current Stock**: Tồn kho hiện tại tại tất cả warehouses
@@ -653,7 +658,6 @@ if po_df is not None and not po_df.empty:
                 st.success("✅ All products have sufficient coverage (current stock + incoming supply)")
         else:
             st.info("No demand data available for analysis")
-    
     with tab4:
         # Detailed list
         st.subheader("📋 Detailed PO List")

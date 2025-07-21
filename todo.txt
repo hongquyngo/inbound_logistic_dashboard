@@ -1,0 +1,54 @@
+# pages/1_📊_PO_Tracking.py
+
+1. Dynamically find min_value, max_value from  filter_options = data_loader.get_filter_options()
+        # Date range
+        date_range = st.date_input(
+            f"{date_type} Range",
+            value=(datetime.now().date(), datetime.now().date() + timedelta(days=30)),
+            min_value=datetime.now().date() - timedelta(days=365),
+            max_value=datetime.now().date() + timedelta(days=365)
+        )
+
+2. Same above
+
+        # Status filter
+        status_options = ['PENDING', 'IN_PROCESS', 'PENDING_INVOICING', 
+                         'PENDING_RECEIPT', 'COMPLETED', 'OVER_DELIVERED']
+        selected_status = st.multiselect(
+            "PO Status",
+            options=status_options,
+            default=None,
+            placeholder="All statuses"
+        )
+
+                # Vendor Category filter (NEW - vendor_type)
+        vendor_category_options = filter_options.get('vendor_types', ['Internal', 'External'])
+        selected_vendor_categories = st.multiselect(
+            "Vendor Category",
+            options=vendor_category_options,
+            default=None,
+            placeholder="All categories",
+            help="Internal: Vendor companies under PTH | External: Not under PTH"
+        )
+        
+        # Vendor Location filter (NEW - vendor_location_type)
+        vendor_location_options = filter_options.get('vendor_location_types', ['Domestic', 'International'])
+        selected_vendor_locations = st.multiselect(
+            "Vendor Location",
+            options=vendor_location_options,
+            default=None,
+            placeholder="All locations",
+            help="Domestic: Same country | International: Cross-border"
+        )
+
+                # Special filters
+        special_filters = st.multiselect(
+            "Special Filters",
+            options=[
+                "Overdue Only",
+                "Over-delivered Only", 
+                "Over-invoiced Only",
+                "Critical Products Only"
+            ],
+            default=None
+        )

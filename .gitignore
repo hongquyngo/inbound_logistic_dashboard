@@ -195,4 +195,5 @@ cython_debug/
 
 **/desktop.ini
 test.py
+todo.py
 docs/
