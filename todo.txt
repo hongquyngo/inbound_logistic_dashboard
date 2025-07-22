@@ -9,7 +9,6 @@
             max_value=datetime.now().date() + timedelta(days=365)
         )
 
-2. Same above
 
         # Status filter
         status_options = ['PENDING', 'IN_PROCESS', 'PENDING_INVOICING', 

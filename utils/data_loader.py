@@ -15,6 +15,7 @@ class InboundDataLoader:
     def __init__(self):
         self.engine = get_db_engine()
     
+
     @st.cache_data(ttl=300)  # Cache for 5 minutes
     def load_po_data(_self, filters=None):
         """Load purchase order data from purchase_order_full_view"""
@@ -156,7 +157,6 @@ class InboundDataLoader:
                     query += " AND brand IN :brands"
                     params['brands'] = tuple(filters['brands'])
                 
-                # New filters
                 if filters.get('pt_codes'):
                     query += " AND pt_code IN :pt_codes"
                     params['pt_codes'] = tuple(filters['pt_codes'])
@@ -169,14 +169,21 @@ class InboundDataLoader:
                     query += " AND vendor_location_type IN :vendor_location_types"
                     params['vendor_location_types'] = tuple(filters['vendor_location_types'])
                 
+                if filters.get('payment_terms'):
+                    query += " AND payment_term IN :payment_terms"
+                    params['payment_terms'] = tuple(filters['payment_terms'])
+                
                 # Special filters
                 if filters.get('overdue_only'):
-                    # Check based on date_type if provided
-                    date_column = filters.get('date_type', 'etd')
-                    query += f" AND {date_column} < CURDATE() AND status != 'COMPLETED'"
+                    # Check ETD by default, but can be ETA based on context
+                    query += " AND etd < CURDATE() AND status NOT IN ('COMPLETED', 'OVER_DELIVERED')"
                 
                 if filters.get('over_delivered_only'):
                     query += " AND is_over_delivered = 'Y'"
+                
+                # NEW: Handle over-invoiced filter
+                if filters.get('over_invoiced_only'):
+                    query += " AND is_over_invoiced = 'Y'"
                 
                 if filters.get('critical_products'):
                     # Products with high gap in outbound
@@ -367,10 +374,13 @@ class InboundDataLoader:
             st.error(f"Failed to load CAN data: {str(e)}")
             return pd.DataFrame()
     
+
+
     def get_filter_options(self):
-        """Get unique values for filters"""
+        """Get unique values for filters - IMPROVED VERSION"""
         try:
             queries = {
+                # Existing filters from purchase_order_full_view
                 'vendors': """
                     SELECT DISTINCT vendor_name 
                     FROM purchase_order_full_view 
@@ -401,18 +411,61 @@ class InboundDataLoader:
                     WHERE payment_term IS NOT NULL 
                     ORDER BY payment_term
                 """,
+                
+                # IMPROVED: Lấy từ purchase_order_full_view thay vì can_tracking_full_view
                 'vendor_types': """
                     SELECT DISTINCT vendor_type 
-                    FROM can_tracking_full_view 
+                    FROM purchase_order_full_view 
                     WHERE vendor_type IS NOT NULL 
                     ORDER BY vendor_type
                 """,
                 'vendor_location_types': """
                     SELECT DISTINCT vendor_location_type 
-                    FROM can_tracking_full_view 
+                    FROM purchase_order_full_view 
                     WHERE vendor_location_type IS NOT NULL 
                     ORDER BY vendor_location_type
                 """,
+                
+                # NEW: Dynamic status options
+                'po_statuses': """
+                    SELECT DISTINCT status 
+                    FROM purchase_order_full_view 
+                    WHERE status IS NOT NULL 
+                    ORDER BY 
+                        CASE status
+                            WHEN 'PENDING' THEN 1
+                            WHEN 'IN_PROCESS' THEN 2
+                            WHEN 'PENDING_INVOICING' THEN 3
+                            WHEN 'PENDING_RECEIPT' THEN 4
+                            WHEN 'COMPLETED' THEN 5
+                            WHEN 'OVER_DELIVERED' THEN 6
+                            ELSE 7
+                        END
+                """,
+                
+                # NEW: Date ranges for dynamic min/max
+                'date_ranges': """
+                    SELECT 
+                        MIN(po_date) as min_po_date,
+                        MAX(po_date) as max_po_date,
+                        MIN(etd) as min_etd,
+                        MAX(etd) as max_etd,
+                        MIN(eta) as min_eta,
+                        MAX(eta) as max_eta
+                    FROM purchase_order_full_view
+                    WHERE po_date IS NOT NULL
+                """,
+                
+                # NEW: Check for special filter availability
+                'special_filter_stats': """
+                    SELECT 
+                        COUNT(CASE WHEN is_over_delivered = 'Y' THEN 1 END) as over_delivered_count,
+                        COUNT(CASE WHEN is_over_invoiced = 'Y' THEN 1 END) as over_invoiced_count,
+                        COUNT(CASE WHEN etd < CURDATE() AND status != 'COMPLETED' THEN 1 END) as overdue_count
+                    FROM purchase_order_full_view
+                """,
+                
+                # Keep existing CAN-related queries cho các pages khác
                 'consignees': """
                     SELECT DISTINCT consignee 
                     FROM can_tracking_full_view 
@@ -443,18 +496,47 @@ class InboundDataLoader:
             with self.engine.connect() as conn:
                 for key, query in queries.items():
                     try:
-                        result = conn.execute(text(query))
-                        options[key] = [row[0] for row in result]
+                        if key == 'date_ranges':
+                            # Handle date range query differently
+                            result = conn.execute(text(query)).fetchone()
+                            if result:
+                                options[key] = {
+                                    'min_po_date': result[0],
+                                    'max_po_date': result[1],
+                                    'min_etd': result[2],
+                                    'max_etd': result[3],
+                                    'min_eta': result[4],
+                                    'max_eta': result[5]
+                                }
+                        elif key == 'special_filter_stats':
+                            # Handle special filter stats
+                            result = conn.execute(text(query)).fetchone()
+                            if result:
+                                options[key] = {
+                                    'over_delivered_count': result[0] or 0,
+                                    'over_invoiced_count': result[1] or 0,
+                                    'overdue_count': result[2] or 0
+                                }
+                        else:
+                            # Handle regular list queries
+                            result = conn.execute(text(query))
+                            options[key] = [row[0] for row in result]
                     except Exception as e:
                         logger.warning(f"Could not get {key} options: {e}")
-                        options[key] = []
+                        if key == 'date_ranges':
+                            options[key] = {}
+                        elif key == 'special_filter_stats':
+                            options[key] = {}
+                        else:
+                            options[key] = []
             
             return options
             
         except Exception as e:
             logger.error(f"Error getting filter options: {e}")
             return {}
-    
+
+
     def get_vendor_list(self):
         """Get list of vendors with active POs"""
         try:

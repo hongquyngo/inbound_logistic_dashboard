@@ -26,6 +26,11 @@ data_loader = InboundDataLoader()
 
 st.title("📊 Purchase Order Tracking")
 
+# Cải tiến cho pages/1_📊_PO_Tracking.py - Phần Filter Section
+
+# Get filter options FIRST (đặt trước khi tạo filters)
+filter_options = data_loader.get_filter_options()
+
 # Filter Section
 with st.expander("🔍 Filters", expanded=True):
     col1, col2, col3 = st.columns(3)
@@ -39,16 +44,39 @@ with st.expander("🔍 Filters", expanded=True):
             horizontal=True
         )
         
-        # Date range
+        # IMPROVED: Dynamic date range based on database
+        date_ranges = filter_options.get('date_ranges', {})
+        
+        # Determine min/max dates based on selected date type
+        if date_type == 'PO Date':
+            db_min_date = date_ranges.get('min_po_date')
+            db_max_date = date_ranges.get('max_po_date')
+        elif date_type == 'ETD':
+            db_min_date = date_ranges.get('min_etd')
+            db_max_date = date_ranges.get('max_etd')
+        else:  # ETA
+            db_min_date = date_ranges.get('min_eta')
+            db_max_date = date_ranges.get('max_eta')
+        
+        # Set default min/max with fallback
+        if db_min_date:
+            min_date = db_min_date
+        else:
+            min_date = datetime.now().date() - timedelta(days=365)
+            
+        if db_max_date:
+            max_date = db_max_date
+        else:
+            max_date = datetime.now().date() + timedelta(days=365)
+        
+        # Date range input with dynamic min/max
         date_range = st.date_input(
             f"{date_type} Range",
-            value=(datetime.now().date(), datetime.now().date() + timedelta(days=30)),
-            min_value=datetime.now().date() - timedelta(days=365),
-            max_value=datetime.now().date() + timedelta(days=365)
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            help=f"Available data range: {min_date} to {max_date}"
         )
-
-    # Get filter options
-    filter_options = data_loader.get_filter_options()
     
     with col2:
         # Vendor filter
@@ -59,7 +87,7 @@ with st.expander("🔍 Filters", expanded=True):
             placeholder="All vendors"
         )
         
-        # PT Code filter (NEW)
+        # PT Code filter
         selected_pt_codes = st.multiselect(
             "PT Codes",
             options=filter_options.get('pt_codes', []),
@@ -88,9 +116,12 @@ with st.expander("🔍 Filters", expanded=True):
     col4, col5, col6 = st.columns(3)
     
     with col4:
-        # Status filter
-        status_options = ['PENDING', 'IN_PROCESS', 'PENDING_INVOICING', 
-                         'PENDING_RECEIPT', 'COMPLETED', 'OVER_DELIVERED']
+        # IMPROVED: Dynamic status filter from database
+        status_options = filter_options.get('po_statuses', [
+            'PENDING', 'IN_PROCESS', 'PENDING_INVOICING', 
+            'PENDING_RECEIPT', 'COMPLETED', 'OVER_DELIVERED'
+        ])
+        
         selected_status = st.multiselect(
             "PO Status",
             options=status_options,
@@ -107,7 +138,7 @@ with st.expander("🔍 Filters", expanded=True):
         )
     
     with col5:
-        # Vendor Category filter (NEW - vendor_type)
+        # IMPROVED: Vendor Category filter from purchase_order_full_view
         vendor_category_options = filter_options.get('vendor_types', ['Internal', 'External'])
         selected_vendor_categories = st.multiselect(
             "Vendor Category",
@@ -117,7 +148,7 @@ with st.expander("🔍 Filters", expanded=True):
             help="Internal: Vendor companies under PTH | External: Not under PTH"
         )
         
-        # Vendor Location filter (NEW - vendor_location_type)
+        # IMPROVED: Vendor Location filter from purchase_order_full_view
         vendor_location_options = filter_options.get('vendor_location_types', ['Domestic', 'International'])
         selected_vendor_locations = st.multiselect(
             "Vendor Location",
@@ -128,16 +159,29 @@ with st.expander("🔍 Filters", expanded=True):
         )
     
     with col6:
-        # Special filters
+        # IMPROVED: Dynamic special filters based on data availability
+        special_filter_stats = filter_options.get('special_filter_stats', {})
+        
+        # Build special filter options dynamically
+        special_filter_options = []
+        
+        if special_filter_stats.get('overdue_count', 0) > 0:
+            special_filter_options.append(f"Overdue Only ({special_filter_stats['overdue_count']} items)")
+        
+        if special_filter_stats.get('over_delivered_count', 0) > 0:
+            special_filter_options.append(f"Over-delivered Only ({special_filter_stats['over_delivered_count']} items)")
+        
+        if special_filter_stats.get('over_invoiced_count', 0) > 0:
+            special_filter_options.append(f"Over-invoiced Only ({special_filter_stats['over_invoiced_count']} items)")
+        
+        # Critical Products luôn available vì check từ delivery_full_view
+        special_filter_options.append("Critical Products Only")
+        
         special_filters = st.multiselect(
             "Special Filters",
-            options=[
-                "Overdue Only",
-                "Over-delivered Only", 
-                "Over-invoiced Only",
-                "Critical Products Only"
-            ],
-            default=None
+            options=special_filter_options,
+            default=None,
+            help="Select special conditions to filter"
         )
         
         # Completion range
@@ -153,20 +197,22 @@ with st.expander("🔍 Filters", expanded=True):
 if st.button("🔄 Apply Filters", type="primary", use_container_width=True):
     st.session_state.filters_applied = True
 
-# Prepare filters
+# Prepare filters - cần xử lý special filters mới
 filters = {
     'date_from': date_range[0] if len(date_range) >= 1 else None,
     'date_to': date_range[1] if len(date_range) >= 2 else date_range[0],
     'vendors': selected_vendors if selected_vendors else None,
-    'pt_codes': selected_pt_codes if selected_pt_codes else None,  # NEW
+    'pt_codes': selected_pt_codes if selected_pt_codes else None,
     'brands': selected_brands if selected_brands else None,
     'products': selected_products if selected_products else None,
     'status': selected_status if selected_status else None,
     'payment_terms': selected_payment_terms if selected_payment_terms else None,
-    'vendor_types': selected_vendor_categories if selected_vendor_categories else None,  # NEW
-    'vendor_location_types': selected_vendor_locations if selected_vendor_locations else None,  # NEW
-    'overdue_only': 'Overdue Only' in special_filters,
-    'over_delivered_only': 'Over-delivered Only' in special_filters,
+    'vendor_types': selected_vendor_categories if selected_vendor_categories else None,
+    'vendor_location_types': selected_vendor_locations if selected_vendor_locations else None,
+    # Process special filters - extract base name without count
+    'overdue_only': any('Overdue Only' in f for f in special_filters),
+    'over_delivered_only': any('Over-delivered Only' in f for f in special_filters),
+    'over_invoiced_only': any('Over-invoiced Only' in f for f in special_filters),
     'critical_products': 'Critical Products Only' in special_filters
 }
 
