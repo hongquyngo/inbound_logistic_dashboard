@@ -113,6 +113,10 @@ class InboundDataLoader:
             params = {}
             
             if filters:
+                if filters.get('legal_entities'):
+                    query += " AND legal_entity IN :legal_entities"
+                    params['legal_entities'] = tuple(filters['legal_entities'])
+
                 if filters.get('date_from'):
                     query += " AND po_date >= :date_from"
                     params['date_from'] = filters['date_from']
@@ -150,8 +154,19 @@ class InboundDataLoader:
                     params['status'] = tuple(filters['status'])
                 
                 if filters.get('products'):
-                    query += " AND product_name IN :products"
-                    params['products'] = tuple(filters['products'])
+                    # Extract product names from "PT_CODE - PRODUCT_NAME" format
+                    product_names = []
+                    pt_codes = []
+                    for product_display in filters['products']:
+                        if ' - ' in product_display:
+                            pt_code, product_name = product_display.split(' - ', 1)
+                            product_names.append(product_name.strip())
+                            pt_codes.append(pt_code.strip())
+                    
+                    # Filter by both product name and PT code
+                    query += " AND (product_name IN :product_names OR pt_code IN :pt_codes)"
+                    params['product_names'] = tuple(product_names)
+                    params['pt_codes'] = tuple(pt_codes)
                 
                 if filters.get('brands'):
                     query += " AND brand IN :brands"
@@ -380,18 +395,19 @@ class InboundDataLoader:
         """Get unique values for filters - IMPROVED VERSION"""
         try:
             queries = {
-                # Existing filters from purchase_order_full_view
-                'vendors': """
-                    SELECT DISTINCT vendor_name 
+                'legal_entities': """
+                    SELECT DISTINCT legal_entity, legal_entity_code
                     FROM purchase_order_full_view 
-                    WHERE vendor_name IS NOT NULL 
-                    ORDER BY vendor_name
+                    WHERE legal_entity IS NOT NULL 
+                    ORDER BY legal_entity
                 """,
                 'products': """
-                    SELECT DISTINCT product_name 
+                    SELECT DISTINCT 
+                        CONCAT(pt_code, ' - ', product_name) as product_display
                     FROM purchase_order_full_view 
-                    WHERE product_name IS NOT NULL 
-                    ORDER BY product_name
+                    WHERE pt_code IS NOT NULL 
+                        AND product_name IS NOT NULL
+                    ORDER BY pt_code
                 """,
                 'pt_codes': """
                     SELECT DISTINCT pt_code 
@@ -412,7 +428,12 @@ class InboundDataLoader:
                     ORDER BY payment_term
                 """,
                 
-                # IMPROVED: Lấy từ purchase_order_full_view thay vì can_tracking_full_view
+                'vendors': """
+                    SELECT DISTINCT vendor_name 
+                    FROM purchase_order_full_view 
+                    WHERE vendor_name IS NOT NULL 
+                    ORDER BY vendor_name
+                """,
                 'vendor_types': """
                     SELECT DISTINCT vendor_type 
                     FROM purchase_order_full_view 
@@ -520,7 +541,14 @@ class InboundDataLoader:
                         else:
                             # Handle regular list queries
                             result = conn.execute(text(query))
-                            options[key] = [row[0] for row in result]
+
+                            if key == 'legal_entities':
+                                # For legal entities, keep as list of tuples (name, code)
+                                options[key] = [(row[0], row[1]) for row in result]
+                            else:
+                                # For others, just get the first column
+                                options[key] = [row[0] for row in result]
+
                     except Exception as e:
                         logger.warning(f"Could not get {key} options: {e}")
                         if key == 'date_ranges':

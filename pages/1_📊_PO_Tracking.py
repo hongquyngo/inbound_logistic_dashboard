@@ -26,8 +26,6 @@ data_loader = InboundDataLoader()
 
 st.title("📊 Purchase Order Tracking")
 
-# Cải tiến cho pages/1_📊_PO_Tracking.py - Phần Filter Section
-
 # Get filter options FIRST (đặt trước khi tạo filters)
 filter_options = data_loader.get_filter_options()
 
@@ -79,30 +77,47 @@ with st.expander("🔍 Filters", expanded=True):
         )
     
     with col2:
-        # Vendor filter
+        # NEW: Legal Entity filter (replacing old Vendors position)
+        legal_entity_options = filter_options.get('legal_entities', [])
+        # Format options to show both name and code
+        legal_entity_display = [f"{le[0]} ({le[1]})" if isinstance(le, tuple) else le 
+                               for le in legal_entity_options]
+        
+        selected_legal_entities = st.multiselect(
+            "Legal Entity (Buyer)",
+            options=legal_entity_display,
+            default=None,
+            placeholder="All legal entities"
+        )
+        
+        # Extract just the legal entity names from selection
+        selected_legal_entity_names = []
+        if selected_legal_entities:
+            for le in selected_legal_entities:
+                if ' (' in le:
+                    selected_legal_entity_names.append(le.split(' (')[0])
+                else:
+                    selected_legal_entity_names.append(le)
+        
+        # Vendor filter (moved from old position)
         selected_vendors = st.multiselect(
             "Vendors",
             options=filter_options.get('vendors', []),
             default=None,
             placeholder="All vendors"
         )
-        
-        # PT Code filter
-        selected_pt_codes = st.multiselect(
-            "PT Codes",
-            options=filter_options.get('pt_codes', []),
-            default=None,
-            placeholder="All PT codes"
-        )
     
     with col3:
-        # Product filter
+        # Products (hiển thị format PT Code - Name)
         selected_products = st.multiselect(
             "Products",
             options=filter_options.get('products', []),
             default=None,
-            placeholder="All products"
+            placeholder="Search products..."
         )
+        
+        # Không cần selected_pt_codes nữa vì đã gộp chung
+        selected_pt_codes = []  # Keep empty for compatibility
         
         # Brand filter
         selected_brands = st.multiselect(
@@ -111,6 +126,7 @@ with st.expander("🔍 Filters", expanded=True):
             default=None,
             placeholder="All brands"
         )
+
 
     # Second row of filters
     col4, col5, col6 = st.columns(3)
@@ -201,10 +217,11 @@ if st.button("🔄 Apply Filters", type="primary", use_container_width=True):
 filters = {
     'date_from': date_range[0] if len(date_range) >= 1 else None,
     'date_to': date_range[1] if len(date_range) >= 2 else date_range[0],
+    'legal_entities': selected_legal_entity_names if selected_legal_entity_names else None,  # NEW
     'vendors': selected_vendors if selected_vendors else None,
-    'pt_codes': selected_pt_codes if selected_pt_codes else None,
+    'pt_codes': selected_pt_codes if selected_pt_codes else None,  # From combined filter
     'brands': selected_brands if selected_brands else None,
-    'products': selected_products if selected_products else None,
+    'products': selected_products if selected_products else None,  # From combined filter
     'status': selected_status if selected_status else None,
     'payment_terms': selected_payment_terms if selected_payment_terms else None,
     'vendor_types': selected_vendor_categories if selected_vendor_categories else None,
@@ -223,6 +240,7 @@ if date_type == 'ETD':
 elif date_type == 'ETA':
     filters['eta_from'] = filters.pop('date_from')
     filters['eta_to'] = filters.pop('date_to')
+
 
 # Load data
 with st.spinner("Loading PO data..."):
