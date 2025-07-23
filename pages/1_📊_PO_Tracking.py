@@ -77,36 +77,26 @@ with st.expander("🔍 Filters", expanded=True):
         )
     
     with col2:
-        # NEW: Legal Entity filter (replacing old Vendors position)
+        # Legal Entity filter với format Code - Name
         legal_entity_options = filter_options.get('legal_entities', [])
-        # Format options to show both name and code
-        legal_entity_display = [f"{le[0]} ({le[1]})" if isinstance(le, tuple) else le 
-                               for le in legal_entity_options]
         
         selected_legal_entities = st.multiselect(
             "Legal Entity (Buyer)",
-            options=legal_entity_display,
+            options=legal_entity_options,
             default=None,
             placeholder="All legal entities"
         )
         
-        # Extract just the legal entity names from selection
-        selected_legal_entity_names = []
-        if selected_legal_entities:
-            for le in selected_legal_entities:
-                if ' (' in le:
-                    selected_legal_entity_names.append(le.split(' (')[0])
-                else:
-                    selected_legal_entity_names.append(le)
+        # Vendor filter với format Code - Name
+        vendor_options = filter_options.get('vendors', [])
         
-        # Vendor filter (moved from old position)
         selected_vendors = st.multiselect(
             "Vendors",
-            options=filter_options.get('vendors', []),
+            options=vendor_options,
             default=None,
             placeholder="All vendors"
         )
-    
+
     with col3:
         # Products (hiển thị format PT Code - Name)
         selected_products = st.multiselect(
@@ -213,20 +203,20 @@ with st.expander("🔍 Filters", expanded=True):
 if st.button("🔄 Apply Filters", type="primary", use_container_width=True):
     st.session_state.filters_applied = True
 
-# Prepare filters - cần xử lý special filters mới
+# Prepare filters - giữ nguyên format "CODE - NAME" như products
 filters = {
     'date_from': date_range[0] if len(date_range) >= 1 else None,
     'date_to': date_range[1] if len(date_range) >= 2 else date_range[0],
-    'legal_entities': selected_legal_entity_names if selected_legal_entity_names else None,  # NEW
-    'vendors': selected_vendors if selected_vendors else None,
-    'pt_codes': selected_pt_codes if selected_pt_codes else None,  # From combined filter
+    'legal_entities': selected_legal_entities if selected_legal_entities else None,  # Giữ nguyên format
+    'vendors': selected_vendors if selected_vendors else None,  # Giữ nguyên format
+    'pt_codes': selected_pt_codes if selected_pt_codes else None,
     'brands': selected_brands if selected_brands else None,
-    'products': selected_products if selected_products else None,  # From combined filter
+    'products': selected_products if selected_products else None,  # Giữ nguyên format
     'status': selected_status if selected_status else None,
     'payment_terms': selected_payment_terms if selected_payment_terms else None,
     'vendor_types': selected_vendor_categories if selected_vendor_categories else None,
     'vendor_location_types': selected_vendor_locations if selected_vendor_locations else None,
-    # Process special filters - extract base name without count
+    # Process special filters
     'overdue_only': any('Overdue Only' in f for f in special_filters),
     'over_delivered_only': any('Over-delivered Only' in f for f in special_filters),
     'over_invoiced_only': any('Over-invoiced Only' in f for f in special_filters),

@@ -114,8 +114,22 @@ class InboundDataLoader:
             
             if filters:
                 if filters.get('legal_entities'):
-                    query += " AND legal_entity IN :legal_entities"
-                    params['legal_entities'] = tuple(filters['legal_entities'])
+                    # Extract codes và names từ format "CODE - NAME"
+                    legal_entity_codes = []
+                    legal_entity_names = []
+                    for le_display in filters['legal_entities']:
+                        if ' - ' in le_display:
+                            code, name = le_display.split(' - ', 1)
+                            legal_entity_codes.append(code.strip())
+                            legal_entity_names.append(name.strip())
+                        else:
+                            # Fallback nếu không có format
+                            legal_entity_names.append(le_display)
+                    
+                    # Query by BOTH code OR name (flexibility)
+                    query += " AND (legal_entity IN :legal_entity_names OR legal_entity_code IN :legal_entity_codes)"
+                    params['legal_entity_names'] = tuple(legal_entity_names)
+                    params['legal_entity_codes'] = tuple(legal_entity_codes)
 
                 if filters.get('date_from'):
                     query += " AND po_date >= :date_from"
@@ -146,8 +160,22 @@ class InboundDataLoader:
                     params['created_by'] = filters['created_by']
                 
                 if filters.get('vendors'):
-                    query += " AND vendor_name IN :vendors"
-                    params['vendors'] = tuple(filters['vendors'])
+                    # Extract codes và names từ format "CODE - NAME"
+                    vendor_codes = []
+                    vendor_names = []
+                    for vendor_display in filters['vendors']:
+                        if ' - ' in vendor_display:
+                            code, name = vendor_display.split(' - ', 1)
+                            vendor_codes.append(code.strip())
+                            vendor_names.append(name.strip())
+                        else:
+                            # Fallback nếu không có format
+                            vendor_names.append(vendor_display)
+                    
+                    # Query by BOTH code OR name (flexibility)
+                    query += " AND (vendor_name IN :vendor_names OR vendor_code IN :vendor_codes)"
+                    params['vendor_names'] = tuple(vendor_names)
+                    params['vendor_codes'] = tuple(vendor_codes)
                 
                 if filters.get('status'):
                     query += " AND status IN :status"
@@ -396,10 +424,12 @@ class InboundDataLoader:
         try:
             queries = {
                 'legal_entities': """
-                    SELECT DISTINCT legal_entity, legal_entity_code
+                    SELECT DISTINCT 
+                        CONCAT(legal_entity_code, ' - ', legal_entity) as legal_entity_display
                     FROM purchase_order_full_view 
                     WHERE legal_entity IS NOT NULL 
-                    ORDER BY legal_entity
+                        AND legal_entity_code IS NOT NULL
+                    ORDER BY legal_entity_code
                 """,
                 'products': """
                     SELECT DISTINCT 
@@ -429,9 +459,12 @@ class InboundDataLoader:
                 """,
                 
                 'vendors': """
-                    SELECT DISTINCT vendor_name 
+                    SELECT DISTINCT
+                    CONCAT(vendor_code, ' - ', vendor_name) as vendor_display
+                     
                     FROM purchase_order_full_view 
                     WHERE vendor_name IS NOT NULL 
+						AND vendor_code IS NOT NULL
                     ORDER BY vendor_name
                 """,
                 'vendor_types': """
@@ -542,12 +575,8 @@ class InboundDataLoader:
                             # Handle regular list queries
                             result = conn.execute(text(query))
 
-                            if key == 'legal_entities':
-                                # For legal entities, keep as list of tuples (name, code)
-                                options[key] = [(row[0], row[1]) for row in result]
-                            else:
-                                # For others, just get the first column
-                                options[key] = [row[0] for row in result]
+                            # For all queries now using CONCAT format, just get the first column
+                            options[key] = [row[0] for row in result]
 
                     except Exception as e:
                         logger.warning(f"Could not get {key} options: {e}")
