@@ -712,16 +712,17 @@ if po_df is not None and not po_df.empty:
                 st.success("✅ All products have sufficient coverage (current stock + incoming supply)")
         else:
             st.info("No demand data available for analysis")
+
     with tab4:
         # Detailed list
         st.subheader("📋 Detailed PO List")
         
         # Column selection with new fields
         default_columns = ['po_number', 'vendor_name', 'vendor_type', 'vendor_location_type',
-                          'po_date', 'etd', 'eta', 'pt_code', 'product_name', 
-                          'buying_quantity', 'pending_standard_arrival_quantity',
-                          'arrival_completion_percent', 'outstanding_arrival_amount_usd',
-                          'status', 'payment_term', 'is_over_delivered']
+                        'po_date', 'etd', 'eta', 'pt_code', 'product_name', 
+                        'buying_quantity', 'pending_standard_arrival_quantity',
+                        'arrival_completion_percent', 'outstanding_arrival_amount_usd',
+                        'status', 'payment_term', 'is_over_delivered']
         
         display_columns = st.multiselect(
             "Select columns to display",
@@ -738,40 +739,232 @@ if po_df is not None and not po_df.empty:
                 if col in display_df.columns:
                     display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d')
             
-            # Apply conditional formatting
-            def highlight_status(val):
-                if val == 'COMPLETED':
-                    return 'background-color: #90ee90'
-                elif val == 'OVER_DELIVERED':
-                    return 'background-color: #ffcccb'
-                elif val == 'PENDING':
-                    return 'background-color: #ffe4b5'
+            # Define format dictionary for numeric columns
+            format_dict = {}
+            
+            # Format quantity columns (no decimals)
+            quantity_columns = [
+                'buying_quantity', 'standard_quantity', 
+                'pending_standard_arrival_quantity', 'total_standard_arrived_quantity',
+                'pending_buying_invoiced_quantity', 'total_buying_invoiced_quantity',
+                'moq', 'spq'
+            ]
+            for col in quantity_columns:
+                if col in display_df.columns:
+                    format_dict[col] = '{:,.0f}'
+            
+            # Format percentage columns (1 decimal)
+            percent_columns = [
+                'arrival_completion_percent', 'invoice_completion_percent',
+                'vat_gst_percent'
+            ]
+            for col in percent_columns:
+                if col in display_df.columns:
+                    format_dict[col] = '{:.1f}%'
+            
+            # Format currency columns
+            currency_columns = [
+                'purchase_unit_cost', 'standard_unit_cost',
+                'total_amount', 'total_amount_usd',
+                'outstanding_arrival_amount_usd', 'outstanding_invoiced_amount_usd',
+                'invoiced_amount_usd', 'arrival_amount_usd'
+            ]
+            for col in currency_columns:
+                if col in display_df.columns:
+                    if 'usd' in col.lower():
+                        format_dict[col] = '${:,.2f}'
+                    else:
+                        format_dict[col] = '{:,.2f}'
+            
+            # Format exchange rate columns (4 decimals)
+            if 'usd_exchange_rate' in display_df.columns:
+                format_dict['usd_exchange_rate'] = '{:.4f}'
+            
+            # Apply conditional formatting functions
+            def highlight_status(row):
+                """Highlight entire row based on status"""
+                if row['status'] == 'COMPLETED':
+                    return ['background-color: #d4f8d4'] * len(row)  # Light green
+                elif row['status'] == 'OVER_DELIVERED':
+                    return ['background-color: #ffcccb'] * len(row)  # Light red
+                elif row['status'] == 'PENDING':
+                    return ['background-color: #fff3cd'] * len(row)  # Light yellow
+                elif row['status'] == 'PENDING_INVOICING':
+                    return ['background-color: #ffe4b5'] * len(row)  # Light orange
+                return [''] * len(row)
+            
+            def highlight_overdue(val, col_name):
+                """Highlight overdue dates"""
+                if col_name in ['etd', 'eta'] and pd.notna(val):
+                    try:
+                        date_val = pd.to_datetime(val)
+                        if date_val.date() < datetime.now().date():
+                            return 'color: red; font-weight: bold'
+                    except:
+                        pass
                 return ''
             
-            def highlight_vendor_type(val):
+            def highlight_completion(val):
+                """Color code completion percentage"""
+                if pd.isna(val):
+                    return ''
+                try:
+                    num_val = float(str(val).replace('%', ''))
+                    if num_val < 30:
+                        return 'color: #dc3545; font-weight: bold'  # Red
+                    elif num_val < 70:
+                        return 'color: #fd7e14; font-weight: bold'  # Orange
+                    elif num_val < 100:
+                        return 'color: #198754'  # Green
+                    else:
+                        return 'color: #0d6efd; font-weight: bold'  # Blue (completed)
+                except:
+                    return ''
+            
+            def highlight_vendor_location(val):
+                """Highlight international vendors"""
                 if val == 'International':
-                    return 'color: #e74c3c; font-weight: bold'
+                    return 'color: #dc3545; font-weight: bold'
                 return ''
             
-            styled_df = display_df.style
+            def highlight_over_delivered(val):
+                """Highlight over-delivered items"""
+                if val == 'Y':
+                    return 'background-color: #ffb3ba; font-weight: bold'
+                return ''
             
+            # Create styled dataframe
+            styled_df = display_df.style.format(format_dict)
+            
+            # Apply row-wise highlighting based on status if status column exists
             if 'status' in display_df.columns:
-                styled_df = styled_df.applymap(highlight_status, subset=['status'])
+                styled_df = styled_df.apply(highlight_status, axis=1)
             
+            # Apply column-specific highlighting
             if 'vendor_location_type' in display_df.columns:
-                styled_df = styled_df.applymap(highlight_vendor_type, subset=['vendor_location_type'])
+                styled_df = styled_df.applymap(
+                    highlight_vendor_location, 
+                    subset=['vendor_location_type']
+                )
             
-            st.dataframe(styled_df, use_container_width=True)
+            if 'arrival_completion_percent' in display_df.columns:
+                styled_df = styled_df.applymap(
+                    highlight_completion,
+                    subset=['arrival_completion_percent']
+                )
             
-            # Export button
+            if 'invoice_completion_percent' in display_df.columns:
+                styled_df = styled_df.applymap(
+                    highlight_completion,
+                    subset=['invoice_completion_percent']
+                )
+            
+            if 'is_over_delivered' in display_df.columns:
+                styled_df = styled_df.applymap(
+                    highlight_over_delivered,
+                    subset=['is_over_delivered']
+                )
+            
+            # Apply date highlighting
+            for col in ['etd', 'eta']:
+                if col in display_df.columns:
+                    styled_df = styled_df.applymap(
+                        lambda val: highlight_overdue(val, col),
+                        subset=[col]
+                    )
+            
+            # Add gradient for outstanding amounts
+            amount_cols = [col for col in ['outstanding_arrival_amount_usd', 'outstanding_invoiced_amount_usd'] 
+                        if col in display_df.columns]
+            if amount_cols:
+                styled_df = styled_df.background_gradient(
+                    subset=amount_cols,
+                    cmap='YlOrRd',
+                    vmin=0
+                )
+            
+            # Display with enhanced settings
+            st.dataframe(
+                styled_df,
+                use_container_width=True,
+                height=600,  # Fixed height for better scrolling
+                hide_index=True
+            )
+            
+            # Add summary statistics
+            st.markdown("---")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Total Rows", 
+                    f"{len(display_df):,}"
+                )
+            
+            with col2:
+                if 'outstanding_arrival_amount_usd' in display_df.columns:
+                    total_outstanding = display_df['outstanding_arrival_amount_usd'].sum()
+                    st.metric(
+                        "Total Outstanding", 
+                        f"${total_outstanding:,.2f}"
+                    )
+            
+            with col3:
+                if 'arrival_completion_percent' in display_df.columns:
+                    avg_completion = display_df['arrival_completion_percent'].mean()
+                    st.metric(
+                        "Avg Completion", 
+                        f"{avg_completion:.1f}%"
+                    )
+            
+            with col4:
+                if 'etd' in display_df.columns:
+                    # Count overdue items
+                    today = datetime.now().date()
+                    overdue_count = 0
+                    for etd in display_df['etd']:
+                        try:
+                            if pd.notna(etd) and pd.to_datetime(etd).date() < today:
+                                overdue_count += 1
+                        except:
+                            pass
+                    st.metric(
+                        "Overdue Items",
+                        f"{overdue_count:,}",
+                        delta_color="inverse"
+                    )
+            
+            # Export button with timestamp
             csv = display_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Detailed List",
                 data=csv,
-                file_name=f"po_detailed_list_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"po_detailed_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime='text/csv'
             )
-    
+            
+            # Add help text
+            with st.expander("ℹ️ Column Formatting Guide"):
+                st.markdown("""
+                **Color Coding:**
+                - **Status Colors**: 
+                - 🟢 Green = Completed
+                - 🟡 Yellow = Pending
+                - 🟠 Orange = Pending Invoicing
+                - 🔴 Red = Over Delivered
+                - **Completion %**: 
+                - Red (< 30%) → Orange (30-70%) → Green (70-99%) → Blue (100%+)
+                - **Dates**: Red & Bold = Overdue
+                - **Vendor Location**: Red & Bold = International
+                - **Outstanding Amounts**: Gradient from Yellow to Red (higher = darker)
+                
+                **Number Formats:**
+                - Quantities: Formatted with thousand separators, no decimals
+                - Percentages: One decimal place
+                - USD Amounts: Formatted with $ symbol and 2 decimal places
+                - Exchange Rates: 4 decimal places
+                """)
+
     with tab5:
         # Financial view
         st.subheader("💰 Financial Analysis")
