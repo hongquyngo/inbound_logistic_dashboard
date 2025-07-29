@@ -417,8 +417,6 @@ class InboundDataLoader:
             st.error(f"Failed to load CAN data: {str(e)}")
             return pd.DataFrame()
     
-
-
     def get_filter_options(self):
         """Get unique values for filters - IMPROVED VERSION"""
         try:
@@ -592,7 +590,6 @@ class InboundDataLoader:
         except Exception as e:
             logger.error(f"Error getting filter options: {e}")
             return {}
-
 
     def get_vendor_list(self):
         """Get list of vendors with active POs"""
@@ -923,7 +920,7 @@ class InboundDataLoader:
                 COUNT(DISTINCT po_number) as monthly_pos,
                 COUNT(DISTINCT CASE WHEN status = 'COMPLETED' THEN po_number END) as completed_pos,
                 COUNT(DISTINCT CASE 
-                    WHEN eta >= etd AND status = 'COMPLETED' THEN po_number 
+                    WHEN eta <= etd AND status = 'COMPLETED' THEN po_number 
                 END) as on_time_pos,
                 SUM(total_amount_usd) as monthly_value,
                 AVG(CASE 
