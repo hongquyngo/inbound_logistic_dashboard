@@ -66,7 +66,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**Legal Entity**")
             with excl_col:
@@ -80,7 +80,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
             )
         
         with col2:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**Vendors**")
             with excl_col:
@@ -94,7 +94,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
             )
         
         with col3:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**Vendor Location**")
             with excl_col:
@@ -111,7 +111,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
         col1, col2 = st.columns(2)
         
         with col1:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([6, 1])
             with label_col:
                 st.markdown("**Products**")
             with excl_col:
@@ -125,7 +125,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
             )
         
         with col2:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([6, 1])
             with label_col:
                 st.markdown("**Brands**")
             with excl_col:
@@ -142,7 +142,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**PO Status**")
             with excl_col:
@@ -156,7 +156,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
             )
         
         with col2:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**Payment Terms**")
             with excl_col:
@@ -170,7 +170,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
             )
         
         with col3:
-            label_col, excl_col = st.columns([4, 1])
+            label_col, excl_col = st.columns([5, 1])
             with label_col:
                 st.markdown("**Created By**")
             with excl_col:
