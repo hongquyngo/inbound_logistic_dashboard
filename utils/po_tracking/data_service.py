@@ -6,7 +6,7 @@ Handles all database operations with proper SQL parameterization
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import logging
 from typing import Dict, List, Optional, Any
 
@@ -269,6 +269,69 @@ class PODataService:
             logger.error(f"Error loading PO data: {e}", exc_info=True)
             st.error(f"Failed to load purchase order data: {str(e)}")
             return pd.DataFrame()
+    
+    def update_po_line_dates(
+        self, 
+        po_line_id: int, 
+        adjust_etd: date, 
+        adjust_eta: date,
+        reason: Optional[str] = None
+    ) -> bool:
+        """
+        Update ETD/ETA dates for a PO line
+        
+        Args:
+            po_line_id: PO line ID to update
+            adjust_etd: New adjusted ETD
+            adjust_eta: New adjusted ETA
+            reason: Reason for the change (for logging)
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Get current user from session state
+            user_email = st.session_state.get('user_email', 'system')
+            
+            update_query = text("""
+                UPDATE product_purchase_orders 
+                SET 
+                    adjust_etd = :adjust_etd,
+                    adjust_eta = :adjust_eta,
+                    updated_by = :updated_by,
+                    updated_date = NOW()
+                WHERE 
+                    id = :po_line_id
+                    AND delete_flag = 0
+            """)
+            
+            with self.engine.begin() as conn:
+                result = conn.execute(
+                    update_query,
+                    {
+                        'po_line_id': po_line_id,
+                        'adjust_etd': adjust_etd,
+                        'adjust_eta': adjust_eta,
+                        'updated_by': user_email
+                    }
+                )
+                
+                rows_affected = result.rowcount
+                
+                if rows_affected > 0:
+                    logger.info(
+                        f"Updated PO line {po_line_id} dates: "
+                        f"ETD={adjust_etd}, ETA={adjust_eta}, "
+                        f"Reason={reason}, User={user_email}"
+                    )
+                    return True
+                else:
+                    logger.warning(f"No rows updated for PO line {po_line_id}")
+                    return False
+            
+        except Exception as e:
+            logger.error(f"Error updating PO line dates: {e}", exc_info=True)
+            return False
     
     @st.cache_data(ttl=300)
     def get_product_demand_vs_incoming(_self) -> pd.DataFrame:

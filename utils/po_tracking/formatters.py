@@ -1,29 +1,31 @@
 """
-Formatting and Display Functions
-Pure functions for data formatting and UI rendering
+Formatters Module - Updated
+Handles display formatting for PO tracking dashboard with column selection
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 from typing import List
+from utils.po_tracking.column_config import (
+    render_column_selector,
+    get_column_display_name,
+    COLUMN_DEFINITIONS
+)
+from utils.po_tracking.date_editor import (
+    render_edit_button,
+    render_date_editor_modal,
+    highlight_overdue_dates
+)
 
 
-def format_currency(value: float) -> str:
-    """Format number as USD currency"""
-    return f"${value:,.2f}"
-
-
-def format_product_display(pt_code: str, name: str, package_size: str, brand: str) -> str:
-    """Format product display: PT001 | Product Name | 500ml (Brand)"""
-    package = package_size if package_size else 'N/A'
-    brand_name = brand if brand else 'No Brand'
-    return f"{pt_code} | {name} | {package} ({brand_name})"
-
-
-def render_metrics(po_df: pd.DataFrame):
-    """Display 6 metric cards"""
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+def render_metrics(po_df: pd.DataFrame) -> None:
+    """
+    Render key metrics cards
+    
+    Args:
+        po_df: Purchase order dataframe
+    """
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         total_pos = po_df['po_number'].nunique()
@@ -31,282 +33,251 @@ def render_metrics(po_df: pd.DataFrame):
     
     with col2:
         total_lines = len(po_df)
-        st.metric("Total Lines", f"{total_lines:,}")
+        st.metric("Total PO Lines", f"{total_lines:,}")
     
     with col3:
-        total_value = po_df['total_amount_usd'].sum()
-        st.metric("Total Value", f"${total_value/1000000:.1f}M")
+        total_value_usd = po_df['total_amount_usd'].sum()
+        st.metric("Total Value", f"${total_value_usd:,.0f}")
     
     with col4:
-        outstanding_value = po_df['outstanding_arrival_amount_usd'].sum()
-        st.metric("Outstanding", f"${outstanding_value/1000000:.1f}M")
-    
-    with col5:
-        overdue_count = len(po_df[po_df['etd'] < datetime.now().date()])
-        st.metric("Overdue Items", f"{overdue_count:,}", delta_color="inverse")
-    
-    with col6:
-        avg_completion = po_df['arrival_completion_percent'].mean()
-        st.metric("Avg Completion", f"{avg_completion:.1f}%")
+        outstanding_usd = po_df['outstanding_arrival_amount_usd'].sum()
+        st.metric("Outstanding Arrival", f"${outstanding_usd:,.0f}")
 
 
-def render_detail_list(po_df: pd.DataFrame):
-    """Render the detailed list tab with styling"""
-    st.subheader("📋 Detailed PO List")
+def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
+    """
+    Render detailed PO list with column selection and edit functionality
     
-    # Default columns
-    default_columns = [
-        'po_number', 'vendor_name', 'vendor_location_type',
-        'po_date', 'etd', 'eta', 'pt_code', 'product_name', 
-        'buying_quantity', 'pending_standard_arrival_quantity',
-        'arrival_completion_percent', 'outstanding_arrival_amount_usd',
-        'status', 'created_by'
-    ]
+    Args:
+        po_df: Purchase order dataframe
+        data_service: PODataService instance for date updates
+    """
+    st.markdown("### 📋 Detailed PO List")
     
-    # Column selection
-    display_columns = st.multiselect(
-        "Select columns to display",
-        options=po_df.columns.tolist(),
-        default=[col for col in default_columns if col in po_df.columns]
-    )
-    
-    if not display_columns:
-        st.warning("Please select at least one column to display")
+    if po_df.empty:
+        st.info("No data to display")
         return
     
-    # Prepare display dataframe
-    display_df = po_df[display_columns].copy()
+    # Render column selector (with expander)
+    selected_columns = render_column_selector()
     
-    # Format date columns
-    date_columns = ['po_date', 'etd', 'eta', 'last_invoice_date']
-    for col in date_columns:
-        if col in display_df.columns:
-            display_df[col] = pd.to_datetime(display_df[col]).dt.strftime('%Y-%m-%d')
+    if not selected_columns:
+        st.warning("⚠️ No columns selected. Please select columns to display.")
+        return
     
-    # Apply styling
-    styled_df = apply_conditional_styling(display_df)
-    
-    # Display dataframe
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        height=600,
-        hide_index=True
-    )
-    
-    # Summary statistics
     st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
+    
+    # Add Actions column for edit buttons
+    display_df = prepare_display_dataframe(po_df, selected_columns)
+    
+    # Show total record count
+    st.caption(f"Showing {len(display_df):,} records")
+    
+    # Render table with edit buttons
+    render_table_with_actions(display_df, po_df, selected_columns, data_service)
+    
+    # Render date editor modal if active
+    if data_service:
+        render_date_editor_modal(data_service)
+    
+    # Export buttons
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 1, 4])
     
     with col1:
-        st.metric("Total Rows", f"{len(display_df):,}")
+        csv = po_df[selected_columns].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
     
     with col2:
-        if 'outstanding_arrival_amount_usd' in display_df.columns:
-            total_outstanding = display_df['outstanding_arrival_amount_usd'].sum()
-            st.metric("Total Outstanding", f"${total_outstanding:,.2f}")
-    
-    with col3:
-        if 'arrival_completion_percent' in display_df.columns:
-            avg_completion = display_df['arrival_completion_percent'].mean()
-            st.metric("Avg Completion", f"{avg_completion:.1f}%")
-    
-    with col4:
-        if 'etd' in display_df.columns:
-            today = datetime.now().date()
-            overdue_count = 0
-            for etd in display_df['etd']:
-                try:
-                    if pd.notna(etd) and pd.to_datetime(etd).date() < today:
-                        overdue_count += 1
-                except:
-                    pass
-            st.metric("Overdue Items", f"{overdue_count:,}", delta_color="inverse")
-    
-    # Export button
-    csv = display_df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📥 Download Detailed List",
-        data=csv,
-        file_name=f"po_detailed_list_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime='text/csv'
-    )
-    
-    # Help text
-    with st.expander("ℹ️ Column Formatting Guide"):
-        st.markdown("""
-        **Color Coding:**
-        - **Status Colors**: 
-          - 🟢 Green = Completed
-          - 🟡 Yellow = Pending
-          - 🟠 Orange = Pending Invoicing
-          - 🔴 Red = Over Delivered
-        - **Completion %**: 
-          - Red (< 30%) → Orange (30-70%) → Green (70-99%) → Blue (100%+)
-        - **Dates**: Red & Bold = Overdue
-        - **Vendor Location**: Red & Bold = International
-        - **Outstanding Amounts**: Gradient from Yellow to Red (higher = darker)
+        from io import BytesIO
         
-        **Number Formats:**
-        - Quantities: Thousand separators, no decimals
-        - Percentages: One decimal place
-        - USD Amounts: $ symbol with 2 decimal places
-        - Exchange Rates: 4 decimal places
+        # Create Excel file in memory
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            po_df[selected_columns].to_excel(writer, index=False, sheet_name='PO Data')
         
-        **Product Format:** PT_CODE | Product Name | Package Size (Brand)
-        """)
+        st.download_button(
+            label="📥 Download Excel",
+            data=excel_buffer.getvalue(),
+            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
 
-def apply_conditional_styling(df: pd.DataFrame) -> pd.DataFrame.style:
-    """Apply all conditional styling to dataframe"""
+def prepare_display_dataframe(po_df: pd.DataFrame, selected_columns: List[str]) -> pd.DataFrame:
+    """
+    Prepare dataframe for display with selected columns and proper formatting
     
-    # Define format dictionary for numeric columns
-    format_dict = {}
+    Args:
+        po_df: Full PO dataframe
+        selected_columns: List of columns to display
+        
+    Returns:
+        Formatted dataframe for display
+    """
+    # Filter to selected columns that exist in dataframe
+    existing_columns = [col for col in selected_columns if col in po_df.columns]
+    display_df = po_df[existing_columns].copy()
     
-    # Format quantity columns (no decimals)
-    quantity_columns = [
-        'buying_quantity', 'standard_quantity', 
-        'pending_standard_arrival_quantity', 'total_standard_arrived_quantity',
-        'pending_buying_invoiced_quantity', 'total_buying_invoiced_quantity',
-        'moq', 'spq'
-    ]
-    for col in quantity_columns:
-        if col in df.columns:
-            format_dict[col] = '{:,.0f}'
+    # Rename columns to display names
+    column_mapping = {
+        col: get_column_display_name(col) 
+        for col in existing_columns
+    }
+    display_df = display_df.rename(columns=column_mapping)
     
-    # Format percentage columns (1 decimal)
-    percent_columns = [
-        'arrival_completion_percent', 'invoice_completion_percent',
-        'vat_gst_percent'
-    ]
-    for col in percent_columns:
-        if col in df.columns:
-            format_dict[col] = '{:.1f}%'
-    
-    # Format currency columns
-    currency_columns = [
-        'purchase_unit_cost', 'standard_unit_cost',
-        'total_amount', 'total_amount_usd',
-        'outstanding_arrival_amount_usd', 'outstanding_invoiced_amount_usd',
-        'invoiced_amount_usd', 'arrival_amount_usd'
-    ]
-    for col in currency_columns:
-        if col in df.columns:
-            if 'usd' in col.lower():
-                format_dict[col] = '${:,.2f}'
-            else:
-                format_dict[col] = '{:,.2f}'
-    
-    # Format exchange rate columns (4 decimals)
-    if 'usd_exchange_rate' in df.columns:
-        format_dict['usd_exchange_rate'] = '{:.4f}'
-    
-    # Create styled dataframe
-    styled_df = df.style.format(format_dict)
-    
-    # Apply row-wise highlighting based on status
-    if 'status' in df.columns:
-        styled_df = styled_df.apply(highlight_status, axis=1)
-    
-    # Apply column-specific highlighting
-    if 'vendor_location_type' in df.columns:
-        styled_df = styled_df.map(
-            highlight_vendor_location, 
-            subset=['vendor_location_type']
-        )
-    
-    if 'arrival_completion_percent' in df.columns:
-        styled_df = styled_df.map(
-            highlight_completion,
-            subset=['arrival_completion_percent']
-        )
-    
-    if 'invoice_completion_percent' in df.columns:
-        styled_df = styled_df.map(
-            highlight_completion,
-            subset=['invoice_completion_percent']
-        )
-    
-    if 'is_over_delivered' in df.columns:
-        styled_df = styled_df.map(
-            highlight_over_delivered,
-            subset=['is_over_delivered']
-        )
-    
-    # Apply date highlighting
-    for col in ['etd', 'eta']:
-        if col in df.columns:
-            styled_df = styled_df.map(
-                lambda val: highlight_overdue(val, col),
-                subset=[col]
+    # Format numeric columns
+    for col in display_df.columns:
+        if 'USD' in col or 'Amount' in col or 'Cost' in col:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"${x:,.2f}" if pd.notna(x) else ""
+            )
+        elif 'Quantity' in col or 'Qty' in col:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
+            )
+        elif '%' in col or 'Percent' in col:
+            display_df[col] = display_df[col].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else ""
             )
     
-    # Add gradient for outstanding amounts
-    amount_cols = [col for col in ['outstanding_arrival_amount_usd', 'outstanding_invoiced_amount_usd'] 
-                   if col in df.columns]
-    if amount_cols:
-        styled_df = styled_df.background_gradient(
-            subset=amount_cols,
-            cmap='YlOrRd',
-            vmin=0
-        )
+    return display_df
+
+
+def render_table_with_actions(
+    display_df: pd.DataFrame, 
+    original_df: pd.DataFrame,
+    selected_columns: List[str],
+    data_service
+) -> None:
+    """
+    Render dataframe with action buttons for each row
     
-    return styled_df
+    Args:
+        display_df: Formatted dataframe for display
+        original_df: Original dataframe with all data
+        selected_columns: List of selected columns
+        data_service: PODataService instance
+    """
+    # Initialize pagination state
+    if 'page_number' not in st.session_state:
+        st.session_state.page_number = 1
+    
+    rows_per_page = 50
+    total_rows = len(display_df)
+    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+    
+    # Calculate indices for current page
+    start_idx = (st.session_state.page_number - 1) * rows_per_page
+    end_idx = min(start_idx + rows_per_page, total_rows)
+    
+    display_df_page = display_df.iloc[start_idx:end_idx]
+    original_df_page = original_df.iloc[start_idx:end_idx]
+    
+    # Create table header
+    with st.container():
+        # Header row
+        header_cols = st.columns([1] + [3] * len(display_df_page.columns))
+        
+        with header_cols[0]:
+            st.markdown("**Actions**")
+        
+        for idx, col_name in enumerate(display_df_page.columns):
+            with header_cols[idx + 1]:
+                st.markdown(f"**{col_name}**")
+        
+        st.markdown("---")
+        
+        # Data rows
+        for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
+            row_cols = st.columns([1] + [3] * len(row))
+            
+            # Action column with edit button
+            with row_cols[0]:
+                original_row = original_df_page.iloc[idx]
+                po_line_id = original_row['po_line_id']
+                
+                render_edit_button(
+                    po_line_id=po_line_id,
+                    row_data=original_row.to_dict()
+                )
+            
+            # Data columns
+            for col_idx, (col_name, value) in enumerate(row.items()):
+                with row_cols[col_idx + 1]:
+                    display_value = str(value) if pd.notna(value) else ""
+                    if len(display_value) > 50:
+                        display_value = display_value[:47] + "..."
+                    st.text(display_value)
+            
+            st.markdown("---")
+    
+    # Pagination controls at bottom
+    st.markdown("---")
+    
+    col1, col2, col3 = st.columns([2, 1, 2])
+    
+    with col1:
+        if st.session_state.page_number > 1:
+            if st.button("← Previous", use_container_width=True):
+                st.session_state.page_number -= 1
+                st.rerun()
+    
+    with col2:
+        st.markdown(f"<div style='text-align: center; padding-top: 8px;'>Page {st.session_state.page_number} of {total_pages}</div>", 
+                   unsafe_allow_html=True)
+    
+    with col3:
+        if st.session_state.page_number < total_pages:
+            if st.button("Next →", use_container_width=True):
+                st.session_state.page_number += 1
+                st.rerun()
 
 
-# Styling helper functions
-def highlight_status(row):
-    """Highlight entire row based on status"""
-    if row.get('status') == 'COMPLETED':
-        return ['background-color: #d4f8d4'] * len(row)
-    elif row.get('status') == 'OVER_DELIVERED':
-        return ['background-color: #ffcccb'] * len(row)
-    elif row.get('status') == 'PENDING':
-        return ['background-color: #fff3cd'] * len(row)
-    elif row.get('status') == 'PENDING_INVOICING':
-        return ['background-color: #ffe4b5'] * len(row)
-    return [''] * len(row)
-
-
-def highlight_overdue(val, col_name):
-    """Highlight overdue dates"""
-    if col_name in ['etd', 'eta'] and pd.notna(val):
-        try:
-            date_val = pd.to_datetime(val)
-            if date_val.date() < datetime.now().date():
-                return 'color: red; font-weight: bold'
-        except:
-            pass
-    return ''
-
-
-def highlight_completion(val):
-    """Color code completion percentage"""
-    if pd.isna(val):
-        return ''
-    try:
-        num_val = float(str(val).replace('%', ''))
-        if num_val < 30:
-            return 'color: #dc3545; font-weight: bold'
-        elif num_val < 70:
-            return 'color: #fd7e14; font-weight: bold'
-        elif num_val < 100:
-            return 'color: #198754'
-        else:
-            return 'color: #0d6efd; font-weight: bold'
-    except:
-        return ''
-
-
-def highlight_vendor_location(val):
-    """Highlight international vendors"""
-    if val == 'International':
-        return 'color: #dc3545; font-weight: bold'
-    return ''
-
-
-def highlight_over_delivered(val):
-    """Highlight over-delivered items"""
-    if val == 'Y':
-        return 'background-color: #ffb3ba; font-weight: bold'
-    return ''
+def render_summary_stats(po_df: pd.DataFrame) -> None:
+    """
+    Render summary statistics section
+    
+    Args:
+        po_df: Purchase order dataframe
+    """
+    st.markdown("### 📊 Summary Statistics")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**By Status:**")
+        status_summary = po_df.groupby('status').agg({
+            'po_line_id': 'count',
+            'total_amount_usd': 'sum'
+        }).round(0)
+        status_summary.columns = ['Count', 'Total USD']
+        st.dataframe(status_summary, use_container_width=True)
+    
+    with col2:
+        st.markdown("**By Vendor Type:**")
+        vendor_summary = po_df.groupby('vendor_type').agg({
+            'po_line_id': 'count',
+            'total_amount_usd': 'sum'
+        }).round(0)
+        vendor_summary.columns = ['Count', 'Total USD']
+        st.dataframe(vendor_summary, use_container_width=True)
+    
+    st.markdown("---")
+    
+    # Top vendors
+    st.markdown("**Top 10 Vendors by Outstanding Amount:**")
+    top_vendors = po_df.groupby('vendor_name').agg({
+        'outstanding_arrival_amount_usd': 'sum',
+        'po_number': 'nunique'
+    }).round(0)
+    top_vendors.columns = ['Outstanding USD', 'PO Count']
+    top_vendors = top_vendors.sort_values('Outstanding USD', ascending=False).head(10)
+    st.dataframe(top_vendors, use_container_width=True)
