@@ -38,7 +38,11 @@ if not auth_manager.check_session():
 
 # Store user info in session state for audit trail
 if 'user_email' not in st.session_state:
-    st.session_state.user_email = auth_manager.get_user_email()
+    st.session_state.user_email = auth_manager.get_user_email() if hasattr(auth_manager, 'get_user_email') else 'system'
+
+# Ensure keycloak_id is available for database operations
+if 'user_keycloak_id' not in st.session_state:
+    st.session_state.user_keycloak_id = auth_manager.get_user_keycloak_id()
 
 # ============================================
 # INITIALIZE SERVICES

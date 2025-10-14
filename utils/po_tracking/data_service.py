@@ -278,7 +278,7 @@ class PODataService:
         reason: Optional[str] = None
     ) -> bool:
         """
-        Update ETD/ETA dates for a PO line
+        Update ETD/ETA dates for a PO line and update the PO header
         
         Args:
             po_line_id: PO line ID to update
@@ -290,44 +290,74 @@ class PODataService:
             bool: True if successful, False otherwise
         """
         try:
-            # Get current user from session state
-            user_email = st.session_state.get('user_email', 'system')
+            # Get current user's keycloak_id from session state
+            user_keycloak_id = st.session_state.get('user_keycloak_id')
+            user_email = st.session_state.get('user_email', 'unknown')
             
-            update_query = text("""
-                UPDATE product_purchase_orders 
-                SET 
-                    adjust_etd = :adjust_etd,
-                    adjust_eta = :adjust_eta,
-                    updated_by = :updated_by,
-                    updated_date = NOW()
-                WHERE 
-                    id = :po_line_id
-                    AND delete_flag = 0
-            """)
+            if not user_keycloak_id:
+                logger.error("No keycloak_id found in session state")
+                return False
             
+            # Use transaction to update both tables atomically
             with self.engine.begin() as conn:
+                # Step 1: Update PO line dates and counters
+                update_line_query = text("""
+                    UPDATE product_purchase_orders 
+                    SET 
+                        adjust_etd = :adjust_etd,
+                        adjust_eta = :adjust_eta,
+                        etd_update_count = etd_update_count + 1,
+                        eta_update_count = eta_update_count + 1
+                    WHERE 
+                        id = :po_line_id
+                        AND delete_flag = 0
+                """)
+                
                 result = conn.execute(
-                    update_query,
+                    update_line_query,
                     {
                         'po_line_id': po_line_id,
                         'adjust_etd': adjust_etd,
-                        'adjust_eta': adjust_eta,
-                        'updated_by': user_email
+                        'adjust_eta': adjust_eta
                     }
                 )
                 
                 rows_affected = result.rowcount
                 
-                if rows_affected > 0:
-                    logger.info(
-                        f"Updated PO line {po_line_id} dates: "
-                        f"ETD={adjust_etd}, ETA={adjust_eta}, "
-                        f"Reason={reason}, User={user_email}"
-                    )
-                    return True
-                else:
-                    logger.warning(f"No rows updated for PO line {po_line_id}")
+                if rows_affected == 0:
+                    logger.warning(f"No PO line found with id {po_line_id}")
                     return False
+                
+                # Step 2: Update PO header with updated_by (keycloak_id) and updated_date
+                update_header_query = text("""
+                    UPDATE purchase_orders po
+                    INNER JOIN product_purchase_orders ppo 
+                        ON po.id = ppo.purchase_order_id
+                    SET 
+                        po.updated_by = :updated_by,
+                        po.updated_date = NOW()
+                    WHERE 
+                        ppo.id = :po_line_id
+                        AND po.delete_flag = 0
+                """)
+                
+                conn.execute(
+                    update_header_query,
+                    {
+                        'po_line_id': po_line_id,
+                        'updated_by': user_keycloak_id  # ← Use keycloak_id, not email!
+                    }
+                )
+                
+                # Log the change with user info and reason
+                logger.info(
+                    f"Updated PO line {po_line_id} dates: "
+                    f"adjust_etd={adjust_etd}, adjust_eta={adjust_eta}, "
+                    f"Reason='{reason}', User={user_email} (keycloak_id: {user_keycloak_id}), "
+                    f"Updated header with user tracking"
+                )
+                
+                return True
             
         except Exception as e:
             logger.error(f"Error updating PO line dates: {e}", exc_info=True)
