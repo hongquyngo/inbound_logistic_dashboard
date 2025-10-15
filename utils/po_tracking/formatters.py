@@ -1,10 +1,11 @@
 """
-Formatters Module - Updated
-Handles display formatting for PO tracking dashboard with column selection
+Formatters Module - Updated with Overdue Date Highlighting
+Handles display formatting for PO tracking dashboard
 """
 
 import streamlit as st
 import pandas as pd
+from datetime import date
 from typing import List
 from utils.po_tracking.column_config import (
     render_column_selector,
@@ -14,7 +15,8 @@ from utils.po_tracking.column_config import (
 from utils.po_tracking.date_editor import (
     render_edit_button,
     render_date_editor_modal,
-    highlight_overdue_dates
+    is_date_overdue,
+    parse_date
 )
 
 
@@ -46,7 +48,7 @@ def render_metrics(po_df: pd.DataFrame) -> None:
 
 def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     """
-    Render detailed PO list with column selection and edit functionality
+    Render detailed PO list with column selection, edit functionality, and overdue highlighting
     
     Args:
         po_df: Purchase order dataframe
@@ -64,22 +66,34 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     if not selected_columns:
         st.warning("⚠️ No columns selected. Please select columns to display.")
         return
-        
+    
+    # Show total record count and overdue count
+    overdue_count = count_overdue_rows(po_df)
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.caption(f"Showing {len(po_df):,} records")
+    with col2:
+        if overdue_count > 0:
+            st.caption(f"⚠️ {overdue_count} overdue ETD/ETA")
+    
     # Add Actions column for edit buttons
     display_df = prepare_display_dataframe(po_df, selected_columns)
     
-    # Show total record count
-    st.caption(f"Showing {len(display_df):,} records")
-    
-    # Render table with edit buttons
+    # Render table with edit buttons and highlighting
     render_table_with_actions(display_df, po_df, selected_columns, data_service)
     
     # Render date editor modal if active
     if data_service:
         render_date_editor_modal(data_service)
     
-    # Export buttons
+    # Legend for highlighting
     st.markdown("---")
+    st.caption("""
+    **Legend:** 
+    ⚠️ Warning emoji on date cells = Overdue ETD or ETA (past today)
+    """)
+    
+    # Export buttons
     col1, col2, col3 = st.columns([1, 1, 4])
     
     with col1:
@@ -131,20 +145,14 @@ def prepare_display_dataframe(po_df: pd.DataFrame, selected_columns: List[str]) 
     }
     display_df = display_df.rename(columns=column_mapping)
     
-    # Format numeric columns
+    # Format numeric columns using vectorized operations
     for col in display_df.columns:
         if 'USD' in col or 'Amount' in col or 'Cost' in col:
-            display_df[col] = display_df[col].apply(
-                lambda x: f"${x:,.2f}" if pd.notna(x) else ""
-            )
+            display_df[col] = display_df[col].fillna(0).map('${:,.2f}'.format)
         elif 'Quantity' in col or 'Qty' in col:
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:,.0f}" if pd.notna(x) else ""
-            )
+            display_df[col] = display_df[col].fillna(0).map('{:,.0f}'.format)
         elif '%' in col or 'Percent' in col:
-            display_df[col] = display_df[col].apply(
-                lambda x: f"{x:.1f}%" if pd.notna(x) else ""
-            )
+            display_df[col] = display_df[col].fillna(0).map('{:.1f}%'.format)
     
     return display_df
 
@@ -156,7 +164,7 @@ def render_table_with_actions(
     data_service
 ) -> None:
     """
-    Render dataframe with action buttons for each row
+    Render dataframe with action buttons and overdue highlighting
     
     Args:
         display_df: Formatted dataframe for display
@@ -179,9 +187,9 @@ def render_table_with_actions(
     display_df_page = display_df.iloc[start_idx:end_idx]
     original_df_page = original_df.iloc[start_idx:end_idx]
     
-    # Create table header
+    # Create table with container
     with st.container():
-        # Header row
+        # Header row with sticky effect
         header_cols = st.columns([1] + [3] * len(display_df_page.columns))
         
         with header_cols[0]:
@@ -193,31 +201,54 @@ def render_table_with_actions(
         
         st.markdown("---")
         
-        # Data rows
+        # Data rows with overdue highlighting
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
+            original_row = original_df_page.iloc[idx]
+            
+            # Normal row container (no special background for overdue)
+            st.markdown(
+                '<div style="background-color: #ffffff; padding: 10px; border-radius: 5px; border-left: 4px solid #e0e0e0;">',
+                unsafe_allow_html=True
+            )
+            
             row_cols = st.columns([1] + [3] * len(row))
             
             # Action column with edit button
             with row_cols[0]:
-                original_row = original_df_page.iloc[idx]
                 po_line_id = original_row['po_line_id']
-                
                 render_edit_button(
                     po_line_id=po_line_id,
                     row_data=original_row.to_dict()
                 )
             
-            # Data columns
+            # Data columns with special formatting for overdue dates
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
+                    # Check if this is a date column and if it's overdue
+                    original_col_name = list(display_df_page.columns)[col_idx]
+                    is_date_col_overdue = False
+                    
+                    if col_name in ['ETD', 'ETA']:
+                        original_col_key = 'etd' if col_name == 'ETD' else 'eta'
+                        if original_col_key in original_row:
+                            is_date_col_overdue = is_date_overdue(original_row[original_col_key])
+                    
+                    # Format display value
                     display_value = str(value) if pd.notna(value) else ""
                     if len(display_value) > 50:
                         display_value = display_value[:47] + "..."
+                    
+                    # Add warning emoji for overdue dates
+                    if is_date_col_overdue:
+                        display_value = f"⚠️ {display_value}"
+                    
                     st.text(display_value)
             
-            st.markdown("---")
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown("")  # Small spacing
     
-    # Pagination controls at bottom   
+    # Pagination controls at bottom
+    st.markdown("---")
     col1, col2, col3 = st.columns([2, 1, 2])
     
     with col1:
@@ -227,14 +258,59 @@ def render_table_with_actions(
                 st.rerun()
     
     with col2:
-        st.markdown(f"<div style='text-align: center; padding-top: 8px;'>Page {st.session_state.page_number} of {total_pages}</div>", 
-                   unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='text-align: center; padding-top: 8px;'>Page {st.session_state.page_number} of {total_pages}</div>", 
+            unsafe_allow_html=True
+        )
     
     with col3:
         if st.session_state.page_number < total_pages:
             if st.button("Next →", use_container_width=True):
                 st.session_state.page_number += 1
                 st.rerun()
+
+
+def row_has_overdue_dates(row: pd.Series) -> bool:
+    """
+    Check if a row has any overdue ETD or ETA dates
+    
+    Args:
+        row: DataFrame row
+        
+    Returns:
+        bool: True if row has overdue dates
+    """
+    etd_overdue = False
+    eta_overdue = False
+    
+    if 'etd' in row:
+        etd_overdue = is_date_overdue(row['etd'])
+    
+    if 'eta' in row:
+        eta_overdue = is_date_overdue(row['eta'])
+    
+    return etd_overdue or eta_overdue
+
+
+def count_overdue_rows(df: pd.DataFrame) -> int:
+    """
+    Count how many rows have overdue dates
+    
+    Args:
+        df: Purchase order dataframe
+        
+    Returns:
+        int: Count of overdue rows
+    """
+    if df.empty:
+        return 0
+    
+    overdue_count = 0
+    for _, row in df.iterrows():
+        if row_has_overdue_dates(row):
+            overdue_count += 1
+    
+    return overdue_count
 
 
 def render_summary_stats(po_df: pd.DataFrame) -> None:

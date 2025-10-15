@@ -73,8 +73,8 @@ else:
             logger.warning(f"Could not load credentials.json: {e}")
     
     # Email configuration
-    EMAIL_SENDER = os.getenv("EMAIL_SENDER", "outbound@prostech.vn")
-    EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
+    EMAIL_SENDER = os.getenv("INBOUND_EMAIL_SENDER", "inbound@prostech.vn")
+    EMAIL_PASSWORD = os.getenv("INBOUND_EMAIL_PASSWORD", "")
     
     # Logging
     logger.info("💻 Running in LOCAL")

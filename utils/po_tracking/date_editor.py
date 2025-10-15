@@ -1,6 +1,6 @@
 """
-ETD/ETA Date Editor Module
-Handles editing of estimated dates for PO lines
+ETD/ETA Date Editor Module - Updated with Email Notification
+Handles editing of estimated dates for PO lines with email alerts
 """
 
 import streamlit as st
@@ -23,7 +23,6 @@ def render_edit_button(po_line_id: int, row_data: Dict[str, Any]) -> None:
     button_key = f"edit_btn_{po_line_id}"
     
     if st.button("✏️", key=button_key, help="Edit ETD/ETA", use_container_width=True):
-        # Store data in session state for modal
         st.session_state.editing_po_line = po_line_id
         st.session_state.editing_row_data = row_data
         st.rerun()
@@ -31,7 +30,7 @@ def render_edit_button(po_line_id: int, row_data: Dict[str, Any]) -> None:
 
 def render_date_editor_modal(data_service) -> None:
     """
-    Render modal dialog for editing ETD/ETA dates
+    Render modal dialog for editing ETD/ETA dates with email notification
     
     Args:
         data_service: PODataService instance for database operations
@@ -42,7 +41,6 @@ def render_date_editor_modal(data_service) -> None:
     po_line_id = st.session_state.editing_po_line
     row_data = st.session_state.editing_row_data
     
-    # Create modal using dialog (Streamlit 1.30+)
     @st.dialog(f"✏️ Update ETD/ETA - PO Line #{po_line_id}", width="large")
     def show_editor():
         # Display PO information
@@ -96,12 +94,19 @@ def render_date_editor_modal(data_service) -> None:
             st.warning("⚠️ Warning: ETD is later than ETA")
         
         # Reason/Notes
-        st.markdown("**Reason for Change:** *(Optional)*")
+        st.markdown("**Reason for Change:** *(Required for email notification)*")
         reason = st.text_area(
             "Reason",
             placeholder="e.g., Vendor delayed shipment due to customs issues",
             height=80,
             label_visibility="collapsed"
+        )
+        
+        # Email notification toggle
+        send_email = st.checkbox(
+            "📧 Send email notification to creator and CC: po.update@prostech.vn",
+            value=True,
+            help="Uncheck to update without sending email"
         )
         
         st.markdown("---")
@@ -124,7 +129,9 @@ def render_date_editor_modal(data_service) -> None:
                     new_eta=new_eta,
                     reason=reason,
                     old_etd=current_etd,
-                    old_eta=current_eta
+                    old_eta=current_eta,
+                    send_email=send_email,
+                    row_data=row_data
                 )
     
     show_editor()
@@ -137,10 +144,12 @@ def save_date_changes(
     new_eta: date,
     reason: str,
     old_etd: Any,
-    old_eta: Any
+    old_eta: Any,
+    send_email: bool,
+    row_data: Dict[str, Any]
 ) -> None:
     """
-    Save ETD/ETA changes to database
+    Save ETD/ETA changes to database and send email notification
     
     Args:
         data_service: PODataService instance
@@ -150,6 +159,8 @@ def save_date_changes(
         reason: Reason for change
         old_etd: Old ETD for comparison
         old_eta: Old ETA for comparison
+        send_email: Whether to send email notification
+        row_data: Complete row data for email
     """
     try:
         # Check if dates actually changed
@@ -180,13 +191,46 @@ def save_date_changes(
             - ETA: {format_date(old_eta_date)} → {format_date(new_eta)} ({eta_diff:+d} days)
             """)
             
+            # Send email notification if requested
+            if send_email:
+                try:
+                    from utils.po_tracking.email_service import POEmailService
+                    
+                    email_service = POEmailService()
+                    
+                    # Get modifier info from session state
+                    modifier_email = st.session_state.get('user_email', 'unknown@prostech.vn')
+                    modifier_name = st.session_state.get('user_fullname', 'Unknown User')
+                    
+                    with st.spinner("📧 Sending email notification..."):
+                        email_sent = email_service.send_etd_eta_update_notification(
+                            po_line_id=po_line_id,
+                            po_number=row_data.get('po_number', 'N/A'),
+                            product_name=row_data.get('product_name', 'N/A'),
+                            vendor_name=row_data.get('vendor_name', 'N/A'),
+                            old_etd=old_etd_date,
+                            new_etd=new_etd,
+                            old_eta=old_eta_date,
+                            new_eta=new_eta,
+                            modifier_email=modifier_email,
+                            modifier_name=modifier_name,
+                            reason=reason
+                        )
+                    
+                    if email_sent:
+                        st.success("📧 Email notification sent successfully!")
+                    else:
+                        st.warning("⚠️ Date updated but email notification failed. Please check logs.")
+                
+                except Exception as e:
+                    logger.error(f"Error sending email: {e}", exc_info=True)
+                    st.warning(f"⚠️ Date updated but email failed: {str(e)}")
+            
             # Clear cache and close editor
             st.cache_data.clear()
             close_editor()
             
-            # Wait a moment then rerun
-            import time
-            time.sleep(1)
+            # Rerun to refresh data
             st.rerun()
         else:
             st.error("⚠️ Failed to update dates. Please try again or contact support.")
@@ -247,40 +291,9 @@ def parse_date(date_value: Any) -> Optional[date]:
     return None
 
 
-def highlight_overdue_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add styling to highlight overdue ETD/ETA dates
-    
-    Args:
-        df: DataFrame with date columns
-        
-    Returns:
-        Styled DataFrame
-    """
-    def highlight_overdue(val):
-        """Highlight overdue dates in red"""
-        if pd.isna(val):
-            return ''
-        
-        try:
-            date_val = parse_date(val)
-            if date_val and date_val < date.today():
-                return 'background-color: #ffcccc; color: #cc0000; font-weight: bold'
-        except:
-            pass
-        
-        return ''
-    
-    styled_df = df.copy()
-    
-    # Apply styling to date columns if they exist
-    date_columns = ['etd', 'eta']
-    existing_date_cols = [col for col in date_columns if col in df.columns]
-    
-    if existing_date_cols:
-        styled_df = df.style.applymap(
-            highlight_overdue,
-            subset=existing_date_cols
-        )
-    
-    return styled_df
+def is_date_overdue(date_value: Any) -> bool:
+    """Check if a date is overdue (past today)"""
+    parsed_date = parse_date(date_value)
+    if parsed_date is None:
+        return False
+    return parsed_date < date.today()

@@ -1,5 +1,5 @@
 """
-Data Service for PO Tracking
+Data Service for PO Tracking - Updated with Sorting
 Handles all database operations with proper SQL parameterization
 """
 
@@ -147,13 +147,26 @@ class PODataService:
             return options
             
         except Exception as e:
-            logger.error(f"Error getting filter options: {e}")
-            return {}
+            logger.error(f"Error getting filter options: {e}", exc_info=True)
+            st.error("⚠️ Failed to load filter options. Please refresh the page.")
+            return {
+                'legal_entities': [],
+                'vendors': [],
+                'products': [],
+                'brands': [],
+                'creators': [],
+                'payment_terms': [],
+                'po_statuses': [],
+                'vendor_types': [],
+                'vendor_location_types': [],
+                'date_ranges': {}
+            }
     
     @st.cache_data(ttl=300)
     def load_po_data(_self, query_parts: str, params: Dict[str, Any]) -> pd.DataFrame:
         """
         Load PO data with filters applied in SQL
+        Sorted by: vendor_name ASC, po_date ASC (oldest first)
         
         Args:
             query_parts: WHERE clause conditions
@@ -197,6 +210,8 @@ class PODataService:
                 package_size,
                 hs_code,
                 vendor_product_code,
+                shelf_life,
+                storage_condition,
                 
                 -- Quantities & UOM
                 standard_uom,
@@ -231,16 +246,22 @@ class PODataService:
                 etd,
                 eta,
                 last_invoice_date,
+                po_line_created_date,
                 
                 -- Terms
                 payment_term,
                 trade_term,
                 vat_gst_percent,
                 
+                -- PO info
+                po_notes,
+                po_type,
+                
                 -- Status
                 status,
                 is_over_delivered,
                 is_over_invoiced,
+                has_cancellation,
                 arrival_completion_percent,
                 invoice_completion_percent,
                 
@@ -255,14 +276,19 @@ class PODataService:
             if query_parts:
                 base_query += f" AND {query_parts}"
             
-            # Order by
-            base_query += " ORDER BY po_date DESC, po_number DESC, po_line_id DESC"
+            # ✅ NEW: Order by vendor_name ASC, po_date ASC (oldest first)
+            base_query += """
+            ORDER BY 
+                vendor_name ASC,
+                po_date ASC,
+                po_line_id ASC
+            """
             
             # Execute query
             with _self.engine.connect() as conn:
                 df = pd.read_sql(text(base_query), conn, params=params)
             
-            logger.info(f"Loaded {len(df)} PO records")
+            logger.info(f"Loaded {len(df)} PO records (sorted by vendor, po_date)")
             return df
             
         except Exception as e:
@@ -345,7 +371,7 @@ class PODataService:
                     update_header_query,
                     {
                         'po_line_id': po_line_id,
-                        'updated_by': user_keycloak_id  # ← Use keycloak_id, not email!
+                        'updated_by': user_keycloak_id
                     }
                 )
                 
@@ -430,5 +456,5 @@ class PODataService:
             return df
             
         except Exception as e:
-            logger.error(f"Error getting product demand vs incoming: {e}")
+            logger.error(f"Error getting product demand vs incoming: {e}", exc_info=True)
             return pd.DataFrame()
