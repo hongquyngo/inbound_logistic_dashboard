@@ -58,8 +58,6 @@ Track and manage purchase orders with real-time status updates,
 financial analytics, and supply chain visibility.
 """)
 
-st.markdown("---")
-
 # ============================================
 # FILTERS SECTION
 # ============================================
@@ -79,7 +77,6 @@ query_parts, params = build_sql_params(filters)
 # ============================================
 # LOAD DATA
 # ============================================
-st.markdown("---")
 
 with st.spinner("🔄 Loading purchase order data..."):
     try:
@@ -96,8 +93,6 @@ if po_df is not None and not po_df.empty:
     # Show metrics
     st.markdown("## 📈 Key Metrics")
     render_metrics(po_df)
-    
-    st.markdown("---")
     
     # Create tabs
     tab1, tab2 = st.tabs(["📋 Detailed List", "📊 Analytics"])
@@ -122,7 +117,6 @@ else:
 # ============================================
 # FOOTER
 # ============================================
-st.markdown("---")
 
 footer_col1, footer_col2, footer_col3 = st.columns(3)
 
@@ -141,25 +135,7 @@ with footer_col3:
 # SIDEBAR INFO
 # ============================================
 with st.sidebar:
-    st.markdown("## ℹ️ About")
-    st.markdown("""
-    **Purchase Order Tracking Dashboard**
-    
-    This dashboard provides:
-    - Real-time PO status monitoring
-    - Financial analytics & reporting
-    - Supply & demand analysis
-    - ETD/ETA date management
-    - Customizable column views
-    
-    **Features:**
-    - ✏️ Edit ETD/ETA dates directly
-    - 📊 Flexible column selection
-    - 💰 Financial insights
-    - 📦 Supply chain visibility
-    - 📥 Export to CSV/Excel
-    """)
-    
+
     st.markdown("---")
     
     st.markdown("## 🔄 Actions")

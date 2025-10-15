@@ -64,9 +64,7 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     if not selected_columns:
         st.warning("⚠️ No columns selected. Please select columns to display.")
         return
-    
-    st.markdown("---")
-    
+        
     # Add Actions column for edit buttons
     display_df = prepare_display_dataframe(po_df, selected_columns)
     
@@ -219,9 +217,7 @@ def render_table_with_actions(
             
             st.markdown("---")
     
-    # Pagination controls at bottom
-    st.markdown("---")
-    
+    # Pagination controls at bottom   
     col1, col2, col3 = st.columns([2, 1, 2])
     
     with col1:
