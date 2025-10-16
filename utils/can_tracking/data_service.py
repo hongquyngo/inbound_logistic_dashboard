@@ -1,8 +1,8 @@
 # utils/can_tracking/data_service.py
 
 """
-CAN Data Service - Updated with SQL Filtering
-Handles all database operations with proper SQL parameterization
+CAN Data Service - Clean Version
+Handles all database operations for CAN tracking with proper error handling
 """
 
 import pandas as pd
@@ -115,6 +115,8 @@ class CANDataService:
                                     'min_arrival_date': result[0],
                                     'max_arrival_date': result[1]
                                 }
+                            else:
+                                options[key] = {}
                         else:
                             result = conn.execute(text(query))
                             options[key] = [row[0] for row in result]
@@ -126,7 +128,6 @@ class CANDataService:
             
         except Exception as e:
             logger.error(f"Error getting filter options: {e}", exc_info=True)
-            st.error("⚠️ Failed to load filter options. Please refresh the page.")
             return {
                 'warehouses': [],
                 'vendors': [],
@@ -152,6 +153,14 @@ class CANDataService:
         """
         try:
             date_ranges = filter_options.get('date_ranges', {})
+            
+            # Check if dict is empty or invalid
+            if not date_ranges or not isinstance(date_ranges, dict):
+                logger.warning("date_ranges is empty or not a dict")
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=30)
+                return (start_date, end_date)
+            
             min_date = date_ranges.get('min_arrival_date')
             max_date = date_ranges.get('max_arrival_date')
             
@@ -163,13 +172,12 @@ class CANDataService:
                 return (start_date, end_date)
                 
         except Exception as e:
-            logger.warning(f"Error getting date range defaults: {e}")
+            logger.error(f"Error getting date range defaults: {e}", exc_info=True)
             end_date = datetime.now().date()
             start_date = end_date - timedelta(days=30)
             return (start_date, end_date)
     
-    @st.cache_data(ttl=300)
-    def load_can_data(_self, query_parts: str, params: Dict[str, Any]) -> pd.DataFrame:
+    def load_can_data(self, query_parts: str, params: Dict[str, Any]) -> pd.DataFrame:
         """
         Load CAN data with filters applied in SQL
         
@@ -181,7 +189,6 @@ class CANDataService:
             DataFrame with CAN data
         """
         try:
-            # Base query from can_tracking_full_view
             base_query = """
             SELECT 
                 arrival_note_number,
@@ -189,13 +196,11 @@ class CANDataService:
                 can_line_id,
                 arrival_date,
                 
-                -- PO info
                 po_number,
                 external_ref_number,
                 po_type,
                 payment_term,
                 
-                -- Warehouse info
                 warehouse_id,
                 warehouse_name,
                 warehouse_address,
@@ -204,7 +209,6 @@ class CANDataService:
                 warehouse_country_name,
                 warehouse_state_name,
                 
-                -- Vendor info
                 vendor,
                 vendor_code,
                 vendor_type,
@@ -217,7 +221,6 @@ class CANDataService:
                 vendor_contact_email,
                 vendor_contact_phone,
                 
-                -- Consignee info
                 consignee,
                 consignee_code,
                 consignee_street,
@@ -228,7 +231,6 @@ class CANDataService:
                 buyer_contact_email,
                 buyer_contact_phone,
                 
-                -- Ship To & Bill To
                 ship_to_company_name,
                 ship_to_contact_name,
                 ship_to_contact_email,
@@ -236,7 +238,6 @@ class CANDataService:
                 bill_to_contact_name,
                 bill_to_contact_email,
                 
-                -- Product info
                 product_name,
                 brand,
                 package_size,
@@ -245,13 +246,11 @@ class CANDataService:
                 shelf_life,
                 standard_uom,
                 
-                -- Quantity & UOM
                 buying_uom,
                 uom_conversion,
                 buying_quantity,
                 standard_quantity,
                 
-                -- Cost info
                 buying_unit_cost,
                 standard_unit_cost,
                 vat_gst,
@@ -259,7 +258,6 @@ class CANDataService:
                 landed_cost_usd,
                 usd_landed_cost_currency_exchange_rate,
                 
-                -- Quantity flow
                 total_arrived_quantity,
                 arrival_quantity,
                 total_stocked_in,
@@ -269,7 +267,6 @@ class CANDataService:
                 days_since_arrival,
                 days_pending,
                 
-                -- Invoice info
                 total_invoiced_quantity,
                 total_standard_invoiced_quantity,
                 invoice_count,
@@ -277,11 +274,9 @@ class CANDataService:
                 invoice_status,
                 uninvoiced_quantity,
                 
-                -- Status
                 stocked_in_status,
                 can_status,
                 
-                -- PO Line Status
                 po_line_total_arrived_qty,
                 po_line_total_invoiced_buying_qty,
                 po_line_pending_invoiced_qty,
@@ -296,11 +291,9 @@ class CANDataService:
             WHERE 1=1
             """
             
-            # Add filter conditions
             if query_parts:
                 base_query += f" AND {query_parts}"
             
-            # Order by days since arrival DESC, pending value DESC
             base_query += """
             ORDER BY 
                 days_since_arrival DESC,
@@ -308,8 +301,7 @@ class CANDataService:
                 can_line_id ASC
             """
             
-            # Execute query
-            with _self.engine.connect() as conn:
+            with self.engine.connect() as conn:
                 df = pd.read_sql(text(base_query), conn, params=params)
             
             logger.info(f"Loaded {len(df)} CAN records with SQL filtering")
@@ -336,13 +328,12 @@ class CANDataService:
             adjust_arrival_date: New adjusted arrival date
             new_status: New CAN status
             new_warehouse_id: New warehouse ID
-            reason: Reason for the change (for logging)
+            reason: Reason for the change
             
         Returns:
-            bool: True if successful, False otherwise
+            bool: True if successful
         """
         try:
-            # Get current user's keycloak_id from session state
             user_keycloak_id = st.session_state.get('user_keycloak_id')
             user_email = st.session_state.get('user_email', 'unknown')
             
@@ -350,9 +341,7 @@ class CANDataService:
                 logger.error("No keycloak_id found in session state")
                 return False
             
-            # Use transaction to update atomically
             with self.engine.begin() as conn:
-                # Update arrivals table
                 update_query = text("""
                     UPDATE arrivals
                     SET 
@@ -383,13 +372,12 @@ class CANDataService:
                     logger.warning(f"No CAN found with number {arrival_note_number}")
                     return False
                 
-                # Log the change
                 logger.info(
                     f"Updated CAN {arrival_note_number}: "
                     f"adjust_arrival_date={adjust_arrival_date}, "
                     f"status={new_status}, "
                     f"warehouse_id={new_warehouse_id}, "
-                    f"Reason='{reason}', User={user_email} (keycloak_id: {user_keycloak_id})"
+                    f"Reason='{reason}', User={user_email}"
                 )
                 
                 return True
@@ -399,14 +387,8 @@ class CANDataService:
             return False
     
     def get_warehouse_options(self) -> List[Dict[str, Any]]:
-        """
-        Get all warehouse options for dropdown
-        
-        Returns:
-            List of dicts with 'id' and 'name' keys
-        """
+        """Get all warehouse options for dropdown"""
         try:
-            # ✅ FIXED: Column is 'name', not 'warehouse_name'
             query = text("""
                 SELECT 
                     id,
@@ -427,17 +409,8 @@ class CANDataService:
             return []
     
     def get_warehouse_name(self, warehouse_id: int) -> str:
-        """
-        Get warehouse name by ID
-        
-        Args:
-            warehouse_id: Warehouse ID
-            
-        Returns:
-            str: Warehouse name or 'N/A' if not found
-        """
+        """Get warehouse name by ID"""
         try:
-            # ✅ FIXED: Column is 'name', not 'warehouse_name'
             query = text("""
                 SELECT name
                 FROM warehouses

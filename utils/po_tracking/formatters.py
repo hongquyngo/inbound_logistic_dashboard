@@ -1,7 +1,7 @@
 # utils/po_tracking/formatters.py
 
 """
-Formatters Module - Updated with Overdue Date Highlighting
+Formatters Module for PO Tracking - Clean Version
 Handles display formatting for PO tracking dashboard
 """
 
@@ -50,7 +50,7 @@ def render_metrics(po_df: pd.DataFrame) -> None:
 
 def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     """
-    Render detailed PO list with column selection, edit functionality, and overdue highlighting
+    Render detailed PO list with column selection and edit functionality
     
     Args:
         po_df: Purchase order dataframe
@@ -62,14 +62,12 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
         st.info("No data to display")
         return
     
-    # Render column selector (with expander)
     selected_columns = render_column_selector()
     
     if not selected_columns:
         st.warning("⚠️ No columns selected. Please select columns to display.")
         return
     
-    # Show total record count and overdue count
     overdue_count = count_overdue_rows(po_df)
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -78,24 +76,15 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
         if overdue_count > 0:
             st.caption(f"⚠️ {overdue_count} overdue ETD/ETA")
     
-    # Add Actions column for edit buttons
     display_df = prepare_display_dataframe(po_df, selected_columns)
-    
-    # Render table with edit buttons and highlighting
     render_table_with_actions(display_df, po_df, selected_columns, data_service)
     
-    # Render date editor modal if active
     if data_service:
         render_date_editor_modal(data_service)
     
-    # Legend for highlighting
     st.markdown("---")
-    st.caption("""
-    **Legend:** 
-    ⚠️ Warning emoji on date cells = Overdue ETD or ETA (past today)
-    """)
+    st.caption("**Legend:** ⚠️ Warning emoji on date cells = Overdue ETD or ETA (past today)")
     
-    # Export buttons
     col1, col2, col3 = st.columns([1, 1, 4])
     
     with col1:
@@ -111,7 +100,6 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     with col2:
         from io import BytesIO
         
-        # Create Excel file in memory
         excel_buffer = BytesIO()
         with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
             po_df[selected_columns].to_excel(writer, index=False, sheet_name='PO Data')
@@ -136,18 +124,15 @@ def prepare_display_dataframe(po_df: pd.DataFrame, selected_columns: List[str]) 
     Returns:
         Formatted dataframe for display
     """
-    # Filter to selected columns that exist in dataframe
     existing_columns = [col for col in selected_columns if col in po_df.columns]
     display_df = po_df[existing_columns].copy()
     
-    # Rename columns to display names
     column_mapping = {
         col: get_column_display_name(col) 
         for col in existing_columns
     }
     display_df = display_df.rename(columns=column_mapping)
     
-    # Format numeric columns using vectorized operations
     for col in display_df.columns:
         if 'USD' in col or 'Amount' in col or 'Cost' in col:
             display_df[col] = display_df[col].fillna(0).map('${:,.2f}'.format)
@@ -174,7 +159,6 @@ def render_table_with_actions(
         selected_columns: List of selected columns
         data_service: PODataService instance
     """
-    # Initialize pagination state
     if 'page_number' not in st.session_state:
         st.session_state.page_number = 1
     
@@ -182,16 +166,13 @@ def render_table_with_actions(
     total_rows = len(display_df)
     total_pages = (total_rows + rows_per_page - 1) // rows_per_page
     
-    # Calculate indices for current page
     start_idx = (st.session_state.page_number - 1) * rows_per_page
     end_idx = min(start_idx + rows_per_page, total_rows)
     
     display_df_page = display_df.iloc[start_idx:end_idx]
     original_df_page = original_df.iloc[start_idx:end_idx]
     
-    # Create table
     with st.container():
-        # Header row
         header_cols = st.columns([1] + [3] * len(display_df_page.columns))
         
         with header_cols[0]:
@@ -203,13 +184,11 @@ def render_table_with_actions(
         
         st.divider()
         
-        # Data rows
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
             original_row = original_df_page.iloc[idx]
             
             row_cols = st.columns([1] + [3] * len(row))
             
-            # Action column with edit button
             with row_cols[0]:
                 po_line_id = original_row['po_line_id']
                 render_edit_button(
@@ -217,10 +196,8 @@ def render_table_with_actions(
                     row_data=original_row.to_dict()
                 )
             
-            # Data columns
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
-                    # Check if this is a date column and if it's overdue
                     is_date_col_overdue = False
                     
                     if col_name in ['ETD', 'ETA']:
@@ -228,22 +205,18 @@ def render_table_with_actions(
                         if original_col_key in original_row:
                             is_date_col_overdue = is_date_overdue(original_row[original_col_key])
                     
-                    # Format display value
                     display_value = str(value) if pd.notna(value) else ""
                     if len(display_value) > 50:
                         display_value = display_value[:47] + "..."
                     
-                    # Add warning emoji for overdue dates
                     if is_date_col_overdue:
                         display_value = f"⚠️ {display_value}"
                     
                     st.text(display_value)
             
-            # Simple spacing between rows
             if idx < len(display_df_page) - 1:
                 st.markdown("")
     
-    # Pagination controls
     st.divider()
     col1, col2, col3 = st.columns([2, 1, 2])
     
@@ -340,7 +313,6 @@ def render_summary_stats(po_df: pd.DataFrame) -> None:
     
     st.markdown("---")
     
-    # Top vendors
     st.markdown("**Top 10 Vendors by Outstanding Amount:**")
     top_vendors = po_df.groupby('vendor_name').agg({
         'outstanding_arrival_amount_usd': 'sum',

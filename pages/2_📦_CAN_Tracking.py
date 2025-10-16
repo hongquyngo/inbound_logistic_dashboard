@@ -1,7 +1,7 @@
 # pages/2_📦_CAN_Tracking.py
 
 """
-Container Arrival Note (CAN) Tracking Page - Refactored
+Container Arrival Note (CAN) Tracking Page - Clean Version
 Enhanced with column selection, editing functionality, and email notifications
 """
 
@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-# Add utils to path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.auth import AuthManager
@@ -45,11 +44,9 @@ if not auth_manager.check_session():
     st.warning("⚠️ Please login to access this page")
     st.stop()
 
-# Store user info in session state for audit trail
 if 'user_email' not in st.session_state:
     st.session_state.user_email = auth_manager.get_user_email() if hasattr(auth_manager, 'get_user_email') else 'system'
 
-# Ensure keycloak_id is available for database operations
 if 'user_keycloak_id' not in st.session_state:
     st.session_state.user_keycloak_id = auth_manager.get_user_keycloak_id()
 
@@ -81,16 +78,22 @@ if not filter_options:
 default_date_range = can_service.get_date_range_defaults(filter_options)
 filters = render_filters(filter_options, default_date_range)
 
-# Build SQL query from filters
 query_parts, params = build_sql_params(filters)
 
 # ============================================
-# LOAD DATA
+# LOAD DATA WITH CACHING
 # ============================================
+
+@st.cache_data(ttl=300)
+def get_cached_can_data(query_parts: str, params_tuple: tuple) -> pd.DataFrame:
+    """Wrapper function for caching CAN data"""
+    params_dict = dict(params_tuple) if params_tuple else {}
+    return can_service.load_can_data(query_parts, params_dict)
 
 with st.spinner("📦 Loading CAN data..."):
     try:
-        can_df = can_service.load_can_data(query_parts, params)
+        params_tuple = tuple(sorted(params.items())) if params else ()
+        can_df = get_cached_can_data(query_parts, params_tuple)
     except Exception as e:
         st.error(f"❌ Failed to load data: {str(e)}")
         st.exception(e)
@@ -100,21 +103,17 @@ with st.spinner("📦 Loading CAN data..."):
 # DISPLAY RESULTS
 # ============================================
 if can_df is not None and not can_df.empty:
-    # Show metrics
     st.markdown("## 📈 Key Metrics")
     render_metrics(can_df, URGENT_DAYS_THRESHOLD, CRITICAL_DAYS_THRESHOLD)
     
-    # Create tabs
     tab1, tab2 = st.tabs(["📋 Detailed List", "📊 Analytics"])
     
     with tab1:
-        # Pass can_service for editing
         render_detail_list(can_df, data_service=can_service)
     
     with tab2:
         st.subheader("📊 CAN Analytics & Trends")
         
-        # Filter to only pending items for analytics
         analytics_df = can_df[can_df['pending_quantity'] > 0]
         
         if not analytics_df.empty:
@@ -199,7 +198,6 @@ with st.sidebar:
         st.rerun()
     
     if st.button("🏠 Reset Filters", use_container_width=True):
-        # Clear filter-related session state
         for key in list(st.session_state.keys()):
             if key.startswith('excl_'):
                 del st.session_state[key]
@@ -207,23 +205,19 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # Data quality indicators
     if can_df is not None and not can_df.empty:
         st.markdown("## 📊 Data Quality")
         
-        # Check for overdue arrivals
         if 'arrival_date' in can_df.columns:
             overdue_count = sum(pd.to_datetime(can_df['arrival_date'], errors='coerce') < datetime.now())
             if overdue_count > 0:
                 st.warning(f"⚠️ {overdue_count} overdue arrivals")
         
-        # Check for urgent items
         pending_df = can_df[can_df['pending_quantity'] > 0]
         urgent_items = len(pending_df[pending_df['days_since_arrival'] > URGENT_DAYS_THRESHOLD])
         if urgent_items > 0:
             st.warning(f"⚠️ {urgent_items} urgent items (>{URGENT_DAYS_THRESHOLD}d)")
         
-        # Check for critical items
         critical_items = len(pending_df[pending_df['days_since_arrival'] > CRITICAL_DAYS_THRESHOLD])
         if critical_items > 0:
             st.error(f"🚨 {critical_items} critical items (>{CRITICAL_DAYS_THRESHOLD}d)")
