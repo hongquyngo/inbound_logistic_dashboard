@@ -1,40 +1,188 @@
 # utils/can_tracking/data_service.py
 
 """
-CAN Data Service - Data Access Layer
-
-Handles all data operations for Container Arrival Note (CAN) tracking,
-including loading, filtering, and providing filter options.
+CAN Data Service - Updated with SQL Filtering
+Handles all database operations with proper SQL parameterization
 """
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
-from datetime import datetime, timedelta
-from utils.db import get_db_engine
+from datetime import datetime, timedelta, date
 import logging
+from typing import Dict, List, Optional, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class CANDataService:
-    """Service class for CAN data operations"""
+    """Handles all database operations for CAN tracking"""
     
-    def __init__(self):
-        """Initialize service with database engine"""
-        self.engine = get_db_engine()
+    def __init__(self, engine=None):
+        from utils.db import get_db_engine
+        self.engine = engine or get_db_engine()
     
-    @st.cache_data(ttl=300)
-    def load_can_data(_self):
+    @st.cache_data(ttl=3600)
+    def get_filter_options(_self) -> Dict[str, Any]:
         """
-        Load ALL CAN data from can_tracking_full_view
-        No pending_only parameter - always load all data
-        
-        Returns:
-            pd.DataFrame: CAN data with all relevant columns
+        Get all filter options for dropdowns
+        Returns: dict with all filter options
         """
         try:
-            query = """
+            queries = {
+                'warehouses': """
+                    SELECT DISTINCT warehouse_name
+                    FROM can_tracking_full_view
+                    WHERE warehouse_name IS NOT NULL
+                    ORDER BY warehouse_name
+                """,
+                'vendors': """
+                    SELECT DISTINCT 
+                        CONCAT(vendor_code, ' - ', vendor) as display_value
+                    FROM can_tracking_full_view
+                    WHERE vendor IS NOT NULL 
+                        AND vendor_code IS NOT NULL
+                    ORDER BY vendor
+                """,
+                'consignees': """
+                    SELECT DISTINCT 
+                        CONCAT(consignee_code, ' - ', consignee) as display_value
+                    FROM can_tracking_full_view
+                    WHERE consignee IS NOT NULL 
+                        AND consignee_code IS NOT NULL
+                    ORDER BY consignee
+                """,
+                'products': """
+                    SELECT DISTINCT 
+                        CONCAT(
+                            pt_code, ' | ', 
+                            product_name, ' | ', 
+                            COALESCE(package_size, 'N/A'), ' (',
+                            COALESCE(brand, 'No Brand'), ')'
+                        ) as display_value
+                    FROM can_tracking_full_view
+                    WHERE pt_code IS NOT NULL 
+                        AND product_name IS NOT NULL
+                    ORDER BY pt_code
+                """,
+                'brands': """
+                    SELECT DISTINCT brand
+                    FROM can_tracking_full_view
+                    WHERE brand IS NOT NULL
+                    ORDER BY brand
+                """,
+                'vendor_types': """
+                    SELECT DISTINCT vendor_type
+                    FROM can_tracking_full_view
+                    WHERE vendor_type IS NOT NULL
+                    ORDER BY vendor_type
+                """,
+                'vendor_location_types': """
+                    SELECT DISTINCT vendor_location_type
+                    FROM can_tracking_full_view
+                    WHERE vendor_location_type IS NOT NULL
+                    ORDER BY vendor_location_type
+                """,
+                'can_statuses': """
+                    SELECT DISTINCT can_status
+                    FROM can_tracking_full_view
+                    WHERE can_status IS NOT NULL
+                    ORDER BY can_status
+                """,
+                'stocked_in_statuses': """
+                    SELECT DISTINCT stocked_in_status
+                    FROM can_tracking_full_view
+                    WHERE stocked_in_status IS NOT NULL
+                    ORDER BY stocked_in_status
+                """,
+                'date_ranges': """
+                    SELECT 
+                        MIN(arrival_date) as min_arrival_date,
+                        MAX(arrival_date) as max_arrival_date
+                    FROM can_tracking_full_view
+                    WHERE arrival_date IS NOT NULL
+                """
+            }
+            
+            options = {}
+            with _self.engine.connect() as conn:
+                for key, query in queries.items():
+                    try:
+                        if key == 'date_ranges':
+                            result = conn.execute(text(query)).fetchone()
+                            if result:
+                                options[key] = {
+                                    'min_arrival_date': result[0],
+                                    'max_arrival_date': result[1]
+                                }
+                        else:
+                            result = conn.execute(text(query))
+                            options[key] = [row[0] for row in result]
+                    except Exception as e:
+                        logger.warning(f"Could not get {key} options: {e}")
+                        options[key] = {} if key == 'date_ranges' else []
+            
+            return options
+            
+        except Exception as e:
+            logger.error(f"Error getting filter options: {e}", exc_info=True)
+            st.error("⚠️ Failed to load filter options. Please refresh the page.")
+            return {
+                'warehouses': [],
+                'vendors': [],
+                'consignees': [],
+                'products': [],
+                'brands': [],
+                'vendor_types': [],
+                'vendor_location_types': [],
+                'can_statuses': [],
+                'stocked_in_statuses': [],
+                'date_ranges': {}
+            }
+    
+    def get_date_range_defaults(self, filter_options: Dict[str, Any]) -> Tuple[date, date]:
+        """
+        Get default date range based on filter options
+        
+        Args:
+            filter_options: Filter options dict
+            
+        Returns:
+            tuple: (min_date, max_date)
+        """
+        try:
+            date_ranges = filter_options.get('date_ranges', {})
+            min_date = date_ranges.get('min_arrival_date')
+            max_date = date_ranges.get('max_arrival_date')
+            
+            if min_date and max_date:
+                return (min_date, max_date)
+            else:
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=30)
+                return (start_date, end_date)
+                
+        except Exception as e:
+            logger.warning(f"Error getting date range defaults: {e}")
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=30)
+            return (start_date, end_date)
+    
+    @st.cache_data(ttl=300)
+    def load_can_data(_self, query_parts: str, params: Dict[str, Any]) -> pd.DataFrame:
+        """
+        Load CAN data with filters applied in SQL
+        
+        Args:
+            query_parts: WHERE clause conditions
+            params: SQL parameters
+            
+        Returns:
+            DataFrame with CAN data
+        """
+        try:
+            # Base query from can_tracking_full_view
+            base_query = """
             SELECT 
                 arrival_note_number,
                 creator,
@@ -46,8 +194,8 @@ class CANDataService:
                 external_ref_number,
                 po_type,
                 payment_term,
-
-                    -- Warehouse info ✅ (ĐÃ THÊM)
+                
+                -- Warehouse info
                 warehouse_id,
                 warehouse_name,
                 warehouse_address,
@@ -136,7 +284,6 @@ class CANDataService:
                 -- PO Line Status
                 po_line_total_arrived_qty,
                 po_line_total_invoiced_buying_qty,
-                po_line_total_invoiced_standard_qty,
                 po_line_pending_invoiced_qty,
                 po_line_pending_arrival_qty,
                 po_line_status,
@@ -146,300 +293,166 @@ class CANDataService:
                 po_line_invoice_completion_percent
                 
             FROM can_tracking_full_view
-            ORDER BY days_since_arrival DESC, pending_value_usd DESC
+            WHERE 1=1
             """
             
-            with _self.engine.connect() as conn:
-                df = pd.read_sql(text(query), conn)
+            # Add filter conditions
+            if query_parts:
+                base_query += f" AND {query_parts}"
             
-            logger.info(f"Loaded {len(df)} CAN records")
+            # Order by days since arrival DESC, pending value DESC
+            base_query += """
+            ORDER BY 
+                days_since_arrival DESC,
+                pending_value_usd DESC,
+                can_line_id ASC
+            """
+            
+            # Execute query
+            with _self.engine.connect() as conn:
+                df = pd.read_sql(text(base_query), conn, params=params)
+            
+            logger.info(f"Loaded {len(df)} CAN records with SQL filtering")
             return df
             
         except Exception as e:
             logger.error(f"Error loading CAN data: {e}", exc_info=True)
-            raise Exception(f"Failed to load CAN data: {str(e)}")
+            st.error(f"Failed to load CAN data: {str(e)}")
+            return pd.DataFrame()
     
-    @st.cache_data(ttl=300)
-    def get_filter_options(_self):
+    def update_can_details(
+        self,
+        arrival_note_number: str,
+        adjust_arrival_date: date,
+        new_status: str,
+        new_warehouse_id: int,
+        reason: Optional[str] = None
+    ) -> bool:
         """
-        Get distinct values for all filter dropdowns with formatted display
-        
-        Returns:
-            dict: Dictionary with formatted filter options
-        """
-        try:
-            options = {}
-            
-            with _self.engine.connect() as conn:
-                # Vendors (formatted as "CODE - NAME")
-                vendor_query = """
-                    SELECT DISTINCT 
-                        vendor_code,
-                        vendor
-                    FROM can_tracking_full_view 
-                    WHERE vendor IS NOT NULL 
-                      AND vendor_code IS NOT NULL
-                    ORDER BY vendor
-                """
-                result = conn.execute(text(vendor_query))
-                vendors = [f"{row[0]} - {row[1]}" for row in result]
-                options['vendors'] = vendors
-                
-                # Consignees (formatted as "CODE - NAME")
-                consignee_query = """
-                    SELECT DISTINCT 
-                        consignee_code,
-                        consignee
-                    FROM can_tracking_full_view 
-                    WHERE consignee IS NOT NULL 
-                      AND consignee_code IS NOT NULL
-                    ORDER BY consignee
-                """
-                result = conn.execute(text(consignee_query))
-                consignees = [f"{row[0]} - {row[1]}" for row in result]
-                options['consignees'] = consignees
-                
-                # Products (formatted as "PT_CODE | Name | Size (Brand)")
-                product_query = """
-                    SELECT DISTINCT 
-                        pt_code,
-                        product_name,
-                        package_size,
-                        brand
-                    FROM can_tracking_full_view 
-                    WHERE product_name IS NOT NULL 
-                      AND pt_code IS NOT NULL
-                    ORDER BY pt_code
-                """
-                result = conn.execute(text(product_query))
-                products = []
-                for row in result:
-                    pt_code, name, size, brand = row
-                    size_str = f" | {size}" if size else ""
-                    brand_str = f" ({brand})" if brand else ""
-                    products.append(f"{pt_code} | {name}{size_str}{brand_str}")
-                options['products'] = products
-                
-                # Simple filters
-                simple_filters = {
-                    'warehouses': """
-                        SELECT DISTINCT warehouse_name 
-                        FROM can_tracking_full_view 
-                        WHERE warehouse_name IS NOT NULL 
-                        ORDER BY warehouse_name
-                    """,
-                    'vendor_types': """
-                        SELECT DISTINCT vendor_type 
-                        FROM can_tracking_full_view 
-                        WHERE vendor_type IS NOT NULL 
-                        ORDER BY vendor_type
-                    """,
-                    'vendor_location_types': """
-                        SELECT DISTINCT vendor_location_type 
-                        FROM can_tracking_full_view 
-                        WHERE vendor_location_type IS NOT NULL 
-                        ORDER BY vendor_location_type
-                    """,
-                    'brands': """
-                        SELECT DISTINCT brand 
-                        FROM can_tracking_full_view 
-                        WHERE brand IS NOT NULL 
-                        ORDER BY brand
-                    """,
-                    'can_statuses': """
-                        SELECT DISTINCT can_status 
-                        FROM can_tracking_full_view 
-                        WHERE can_status IS NOT NULL 
-                        ORDER BY can_status
-                    """,
-                    'stocked_in_statuses': """
-                        SELECT DISTINCT stocked_in_status 
-                        FROM can_tracking_full_view 
-                        WHERE stocked_in_status IS NOT NULL 
-                        ORDER BY stocked_in_status
-                    """
-                }
-                
-                for key, query in simple_filters.items():
-                    try:
-                        result = conn.execute(text(query))
-                        options[key] = [row[0] for row in result]
-                    except Exception as e:
-                        logger.warning(f"Could not get {key} options: {e}")
-                        options[key] = []
-            
-            return options
-            
-        except Exception as e:
-            logger.error(f"Error getting filter options: {e}", exc_info=True)
-            return {}
-    
-    def get_date_range_defaults(self, df):
-        """
-        Get default date range based on data
+        Update CAN arrival date, status, and warehouse
         
         Args:
-            df (pd.DataFrame): CAN dataframe
+            arrival_note_number: CAN number
+            adjust_arrival_date: New adjusted arrival date
+            new_status: New CAN status
+            new_warehouse_id: New warehouse ID
+            reason: Reason for the change (for logging)
             
         Returns:
-            tuple: (min_date, max_date) as datetime.date objects
+            bool: True if successful, False otherwise
         """
         try:
-            if df is None or df.empty:
-                end_date = datetime.now().date()
-                start_date = end_date - timedelta(days=30)
-                return (start_date, end_date)
+            # Get current user's keycloak_id from session state
+            user_keycloak_id = st.session_state.get('user_keycloak_id')
+            user_email = st.session_state.get('user_email', 'unknown')
             
-            df['arrival_date'] = pd.to_datetime(df['arrival_date'])
-            min_date = df['arrival_date'].min().date()
-            max_date = df['arrival_date'].max().date()
+            if not user_keycloak_id:
+                logger.error("No keycloak_id found in session state")
+                return False
             
-            return (min_date, max_date)
+            # Use transaction to update atomically
+            with self.engine.begin() as conn:
+                # Update arrivals table
+                update_query = text("""
+                    UPDATE arrivals
+                    SET 
+                        adjust_arrival_date = :adjust_arrival_date,
+                        status = :new_status,
+                        warehouse_id = :new_warehouse_id,
+                        arrival_date_update_count = arrival_date_update_count + 1,
+                        updated_by = :updated_by
+                    WHERE 
+                        arrival_note_number = :arrival_note_number
+                        AND delete_flag = 0
+                """)
+                
+                result = conn.execute(
+                    update_query,
+                    {
+                        'arrival_note_number': arrival_note_number,
+                        'adjust_arrival_date': adjust_arrival_date,
+                        'new_status': new_status,
+                        'new_warehouse_id': new_warehouse_id,
+                        'updated_by': user_keycloak_id
+                    }
+                )
+                
+                rows_affected = result.rowcount
+                
+                if rows_affected == 0:
+                    logger.warning(f"No CAN found with number {arrival_note_number}")
+                    return False
+                
+                # Log the change
+                logger.info(
+                    f"Updated CAN {arrival_note_number}: "
+                    f"adjust_arrival_date={adjust_arrival_date}, "
+                    f"status={new_status}, "
+                    f"warehouse_id={new_warehouse_id}, "
+                    f"Reason='{reason}', User={user_email} (keycloak_id: {user_keycloak_id})"
+                )
+                
+                return True
             
         except Exception as e:
-            logger.warning(f"Error getting date range defaults: {e}")
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=30)
-            return (start_date, end_date)
+            logger.error(f"Error updating CAN: {e}", exc_info=True)
+            return False
     
-    def apply_filters(self, df, filters):
+    def get_warehouse_options(self) -> List[Dict[str, Any]]:
         """
-        Apply filters to CAN dataframe with exclusion logic
+        Get all warehouse options for dropdown
+        
+        Returns:
+            List of dicts with 'id' and 'name' keys
+        """
+        try:
+            # ✅ FIXED: Column is 'name', not 'warehouse_name'
+            query = text("""
+                SELECT 
+                    id,
+                    name
+                FROM warehouses
+                WHERE delete_flag = 0
+                ORDER BY name
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query)
+                warehouses = [{'id': row[0], 'name': row[1]} for row in result]
+            
+            return warehouses
+            
+        except Exception as e:
+            logger.error(f"Error getting warehouse options: {e}", exc_info=True)
+            return []
+    
+    def get_warehouse_name(self, warehouse_id: int) -> str:
+        """
+        Get warehouse name by ID
         
         Args:
-            df (pd.DataFrame): Source CAN dataframe
-            filters (dict): Filter parameters with exclusion flags
-                
+            warehouse_id: Warehouse ID
+            
         Returns:
-            pd.DataFrame: Filtered dataframe
+            str: Warehouse name or 'N/A' if not found
         """
         try:
-            if df is None or df.empty:
-                return df
+            # ✅ FIXED: Column is 'name', not 'warehouse_name'
+            query = text("""
+                SELECT name
+                FROM warehouses
+                WHERE id = :warehouse_id
+                AND delete_flag = 0
+                LIMIT 1
+            """)
             
-            filtered_df = df.copy()
-            filtered_df['arrival_date'] = pd.to_datetime(filtered_df['arrival_date'])
+            with self.engine.connect() as conn:
+                result = conn.execute(query, {'warehouse_id': warehouse_id}).fetchone()
+                if result:
+                    return result[0]
             
-            # Date range filter
-            if filters.get('arrival_date_from'):
-                filtered_df = filtered_df[
-                    filtered_df['arrival_date'].dt.date >= filters['arrival_date_from']
-                ]
-            
-            if filters.get('arrival_date_to'):
-                filtered_df = filtered_df[
-                    filtered_df['arrival_date'].dt.date <= filters['arrival_date_to']
-                ]
-            
-            # Helper function for exclusion logic
-            def apply_filter_with_exclusion(df, column, values, exclude=False, parse_format=None):
-                if not values:
-                    return df
-                
-                if parse_format == 'code_name':
-                    # Parse "CODE - NAME" format
-                    codes = []
-                    names = []
-                    for val in values:
-                        if ' - ' in val:
-                            code, name = val.split(' - ', 1)
-                            codes.append(code.strip())
-                            names.append(name.strip())
-                    
-                    if exclude:
-                        if codes and names:
-                            mask = ~(df[f'{column}_code'].isin(codes) | df[column].isin(names))
-                        else:
-                            mask = ~df[column].isin(names)
-                    else:
-                        if codes and names:
-                            mask = df[f'{column}_code'].isin(codes) | df[column].isin(names)
-                        else:
-                            mask = df[column].isin(names)
-                    
-                    return df[mask]
-                
-                elif parse_format == 'product':
-                    # Parse "PT_CODE | Name | Size (Brand)" format
-                    pt_codes = []
-                    product_names = []
-                    for val in values:
-                        parts = val.split(' | ')
-                        if len(parts) >= 2:
-                            pt_codes.append(parts[0].strip())
-                            product_names.append(parts[1].strip())
-                    
-                    if exclude:
-                        mask = ~(df['pt_code'].isin(pt_codes) | df['product_name'].isin(product_names))
-                    else:
-                        mask = df['pt_code'].isin(pt_codes) | df['product_name'].isin(product_names)
-                    
-                    return df[mask]
-                
-                else:
-                    # Simple filter
-                    if exclude:
-                        return df[~df[column].isin(values)]
-                    else:
-                        return df[df[column].isin(values)]
-            
-            # Apply vendor filter
-            if filters.get('vendors'):
-                filtered_df = apply_filter_with_exclusion(
-                    filtered_df, 
-                    'vendor', 
-                    filters['vendors'],
-                    filters.get('excl_vendors', False),
-                    parse_format='code_name'
-                )
-            
-            # Apply consignee filter
-            if filters.get('consignees'):
-                filtered_df = apply_filter_with_exclusion(
-                    filtered_df,
-                    'consignee',
-                    filters['consignees'],
-                    filters.get('excl_consignees', False),
-                    parse_format='code_name'
-                )
-            
-            # Apply product filter
-            if filters.get('products'):
-                filtered_df = apply_filter_with_exclusion(
-                    filtered_df,
-                    'product_name',
-                    filters['products'],
-                    filters.get('excl_products', False),
-                    parse_format='product'
-                )
-            
-            # Apply simple filters with exclusion
-            simple_filters = [
-                ('warehouse_name', 'warehouses', None),  # Warehouse filter (no exclusion)
-                ('vendor_type', 'vendor_types', 'excl_vendor_types'),
-                ('vendor_location_type', 'vendor_locations', None),  # No exclusion for vendor location
-                ('brand', 'brands', 'excl_brands'),  # Brand with exclusion
-                ('can_status', 'can_statuses', 'excl_can_statuses'),  # CAN status with exclusion
-                ('stocked_in_status', 'stocked_in_statuses', None)  # No exclusion for stock-in status
-            ]
-            
-            for column, filter_key, excl_key in simple_filters:
-                if filters.get(filter_key):
-                    exclude = filters.get(excl_key, False) if excl_key else False
-                    filtered_df = apply_filter_with_exclusion(
-                        filtered_df,
-                        column,
-                        filters[filter_key],
-                        exclude
-                    )
-            
-            logger.info(
-                f"Applied filters: {len(df)} -> {len(filtered_df)} records "
-                f"({len(filtered_df)/len(df)*100:.1f}% retained)"
-            )
-            
-            return filtered_df
+            return 'N/A'
             
         except Exception as e:
-            logger.error(f"Error applying filters: {e}", exc_info=True)
-            return df
+            logger.error(f"Error getting warehouse name: {e}", exc_info=True)
+            return 'N/A'
