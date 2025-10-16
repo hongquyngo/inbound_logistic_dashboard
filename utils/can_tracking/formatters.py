@@ -238,17 +238,11 @@ def render_table_with_actions(
             with header_cols[idx + 1]:
                 st.markdown(f"**{col_name}**")
         
-        st.markdown("---")
+        st.divider()
         
         # Data rows
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
             original_row = original_df_page.iloc[idx]
-            
-            # Row container
-            st.markdown(
-                '<div style="background-color: #ffffff; padding: 10px; border-radius: 5px; border-left: 4px solid #e0e0e0;">',
-                unsafe_allow_html=True
-            )
             
             row_cols = st.columns([1] + [3] * len(row))
             
@@ -262,7 +256,7 @@ def render_table_with_actions(
                     row_data=original_row.to_dict()
                 )
             
-            # Data columns with overdue highlighting
+            # Data columns
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
                     # Check if arrival date is overdue
@@ -283,11 +277,12 @@ def render_table_with_actions(
                     
                     st.text(display_value)
             
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown("")
+            # Simple spacing between rows
+            if idx < len(display_df_page) - 1:
+                st.markdown("")
     
     # Pagination controls
-    st.markdown("---")
+    st.divider()
     col1, col2, col3 = st.columns([2, 1, 2])
     
     with col1:
@@ -307,7 +302,6 @@ def render_table_with_actions(
             if st.button("Next →", use_container_width=True, key="can_next"):
                 st.session_state.can_page_number += 1
                 st.rerun()
-
 
 def row_has_overdue_dates(row: pd.Series) -> bool:
     """Check if a row has overdue arrival date"""

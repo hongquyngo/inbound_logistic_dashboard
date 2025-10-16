@@ -1,3 +1,5 @@
+# utils/po_tracking/formatters.py
+
 """
 Formatters Module - Updated with Overdue Date Highlighting
 Handles display formatting for PO tracking dashboard
@@ -187,9 +189,9 @@ def render_table_with_actions(
     display_df_page = display_df.iloc[start_idx:end_idx]
     original_df_page = original_df.iloc[start_idx:end_idx]
     
-    # Create table with container
+    # Create table
     with st.container():
-        # Header row with sticky effect
+        # Header row
         header_cols = st.columns([1] + [3] * len(display_df_page.columns))
         
         with header_cols[0]:
@@ -199,17 +201,11 @@ def render_table_with_actions(
             with header_cols[idx + 1]:
                 st.markdown(f"**{col_name}**")
         
-        st.markdown("---")
+        st.divider()
         
-        # Data rows with overdue highlighting
+        # Data rows
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
             original_row = original_df_page.iloc[idx]
-            
-            # Normal row container (no special background for overdue)
-            st.markdown(
-                '<div style="background-color: #ffffff; padding: 10px; border-radius: 5px; border-left: 4px solid #e0e0e0;">',
-                unsafe_allow_html=True
-            )
             
             row_cols = st.columns([1] + [3] * len(row))
             
@@ -221,11 +217,10 @@ def render_table_with_actions(
                     row_data=original_row.to_dict()
                 )
             
-            # Data columns with special formatting for overdue dates
+            # Data columns
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
                     # Check if this is a date column and if it's overdue
-                    original_col_name = list(display_df_page.columns)[col_idx]
                     is_date_col_overdue = False
                     
                     if col_name in ['ETD', 'ETA']:
@@ -244,16 +239,17 @@ def render_table_with_actions(
                     
                     st.text(display_value)
             
-            st.markdown('</div>', unsafe_allow_html=True)
-            st.markdown("")  # Small spacing
+            # Simple spacing between rows
+            if idx < len(display_df_page) - 1:
+                st.markdown("")
     
-    # Pagination controls at bottom
-    st.markdown("---")
+    # Pagination controls
+    st.divider()
     col1, col2, col3 = st.columns([2, 1, 2])
     
     with col1:
         if st.session_state.page_number > 1:
-            if st.button("← Previous", use_container_width=True):
+            if st.button("← Previous", use_container_width=True, key="po_prev"):
                 st.session_state.page_number -= 1
                 st.rerun()
     
@@ -265,7 +261,7 @@ def render_table_with_actions(
     
     with col3:
         if st.session_state.page_number < total_pages:
-            if st.button("Next →", use_container_width=True):
+            if st.button("Next →", use_container_width=True, key="po_next"):
                 st.session_state.page_number += 1
                 st.rerun()
 
