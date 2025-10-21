@@ -1,7 +1,11 @@
 """
-Overview Tab for Vendor Performance
+Overview Tab - Simplified Dashboard
 
-Shows high-level performance summary and comparison views.
+Shows snapshot of vendor performance in one screen:
+- Key metrics (6 cards)
+- Conversion rate gauge
+- Alerts
+- Top products
 """
 
 import streamlit as st
@@ -11,10 +15,14 @@ from typing import Optional
 
 from ..calculations import PerformanceCalculator
 from ..visualizations import ChartFactory
+from ..constants import (
+    COLORS, format_currency, format_percentage, 
+    get_conversion_tier, PLOTLY_CONFIG
+)
 
 
 def render(
-    vendor_metrics: pd.DataFrame,
+    vendor_summary: pd.DataFrame,
     po_data: pd.DataFrame,
     selected_vendor: str
 ) -> None:
@@ -22,148 +30,167 @@ def render(
     Render Overview Tab
     
     Args:
-        vendor_metrics: DataFrame with vendor metrics
-        po_data: DataFrame with PO data
-        selected_vendor: Selected vendor name or "All Vendors"
+        vendor_summary: Vendor summary data
+        po_data: PO data
+        selected_vendor: Selected vendor name
     """
     st.subheader("📊 Performance Overview")
     
-    if vendor_metrics.empty:
-        st.warning("No vendor performance data available")
+    if vendor_summary.empty:
+        st.warning("No vendor data available")
         return
     
-    # Calculate performance scores once at the beginning
     calc = PerformanceCalculator()
-    vendor_metrics = calc.calculate_performance_score(vendor_metrics)
     
     if selected_vendor == "All Vendors":
-        _render_all_vendors(vendor_metrics)
+        _render_all_vendors_overview(vendor_summary, calc)
     else:
-        _render_single_vendor(vendor_metrics, selected_vendor)
-    
-    # Performance comparison table
-    st.markdown("---")
-    _render_performance_table(vendor_metrics, selected_vendor)
+        _render_single_vendor_overview(vendor_summary, po_data, selected_vendor, calc)
 
 
-def _render_all_vendors(vendor_metrics: pd.DataFrame) -> None:
+def _render_all_vendors_overview(
+    vendor_summary: pd.DataFrame,
+    calc: PerformanceCalculator
+) -> None:
     """
-    Show comparison view for all vendors
+    Show overview for all vendors
     
     Args:
-        vendor_metrics: DataFrame with all vendor metrics (already has performance_score)
+        vendor_summary: All vendor summary data
+        calc: Calculator instance
     """
-    # Note: performance_score already calculated in render()
+    st.markdown("### Overall Performance Summary")
     
-    # Overall summary metrics
-    st.markdown("### Overall Vendor Performance Summary")
+    # Top 6 KPIs
     col1, col2, col3, col4, col5, col6 = st.columns(6)
+    
+    total_vendors = len(vendor_summary)
+    total_order = vendor_summary['total_order_value'].sum()
+    total_invoiced = vendor_summary['total_invoiced_value'].sum()
+    total_pending = vendor_summary['pending_delivery_value'].sum()
+    avg_conversion = vendor_summary['conversion_rate'].mean()
+    total_pos = vendor_summary['total_pos'].sum()
     
     with col1:
         st.metric(
             "Total Vendors",
-            f"{len(vendor_metrics):,}",
-            help="Total number of active vendors"
+            f"{total_vendors:,}",
+            help="Number of active vendors"
         )
     
     with col2:
-        total_po_value = vendor_metrics['total_po_value'].sum()
         st.metric(
-            "Total Spend",
-            f"${total_po_value/1000000:.1f}M",
-            help="Total purchase value across all vendors"
+            "💵 Total Order Entry",
+            format_currency(total_order, compact=True),
+            help="Total value of all purchase orders"
         )
     
     with col3:
-        avg_on_time = vendor_metrics['on_time_rate'].mean()
         st.metric(
-            "Avg On-Time Rate",
-            f"{avg_on_time:.1f}%",
-            delta=f"{avg_on_time - 80:.1f}%",
-            delta_color="normal" if avg_on_time >= 80 else "inverse"
+            "📮 Invoiced Value",
+            format_currency(total_invoiced, compact=True),
+            delta=f"{(total_invoiced/total_order*100):.1f}% of order" if total_order > 0 else None,
+            help="Total invoiced amount"
         )
     
     with col4:
-        avg_completion = vendor_metrics['completion_rate'].mean()
         st.metric(
-            "Avg Completion",
-            f"{avg_completion:.1f}%",
-            help="Average PO completion rate"
+            "⏳ Pending Delivery",
+            format_currency(total_pending, compact=True),
+            delta=f"{(total_pending/total_order*100):.1f}%" if total_order > 0 else None,
+            delta_color="inverse",
+            help="Outstanding delivery value"
         )
     
     with col5:
-        high_performers = len(vendor_metrics[vendor_metrics['performance_score'] >= 80])
+        conversion_delta = avg_conversion - 90
         st.metric(
-            "High Performers",
-            f"{high_performers}",
-            help="Vendors with score ≥ 80%"
+            "🎯 Avg Conversion",
+            f"{avg_conversion:.1f}%",
+            delta=f"{conversion_delta:+.1f}% vs target",
+            delta_color="normal" if avg_conversion >= 90 else "inverse",
+            help="Average order to invoice conversion"
         )
     
     with col6:
-        total_outstanding = vendor_metrics['outstanding_invoices'].sum()
         st.metric(
-            "Total Outstanding",
-            f"${total_outstanding/1000000:.1f}M",
-            help="Total outstanding invoices"
+            "📦 Total POs",
+            f"{int(total_pos):,}",
+            help="Total purchase orders"
         )
     
     st.markdown("---")
     
-    # Two columns layout for charts
+    # Conversion Rate Progress Bar
+    st.markdown("#### 📊 Order Entry → Invoice Conversion")
+    conversion_pct = (total_invoiced / total_order * 100) if total_order > 0 else 0
+    
+    progress_col1, progress_col2 = st.columns([3, 1])
+    
+    with progress_col1:
+        st.progress(min(conversion_pct / 100, 1.0))
+        st.caption(
+            f"{format_currency(total_invoiced)} / {format_currency(total_order)} "
+            f"({conversion_pct:.1f}%)"
+        )
+    
+    with progress_col2:
+        tier = get_conversion_tier(conversion_pct)
+        st.markdown(f"**{tier}**")
+        if conversion_pct < 90:
+            st.caption("⚠️ Below target (90%)")
+    
+    st.markdown("---")
+    
+    # Top Vendors
     col1, col2 = st.columns(2)
     
     with col1:
-        st.markdown("### Top Performing Vendors")
-        
-        # Performance matrix scatter plot
+        st.markdown("### Top 10 Vendors by Order Value")
         chart_factory = ChartFactory()
-        fig_matrix = chart_factory.create_performance_matrix(vendor_metrics, top_n=10)
-        st.plotly_chart(fig_matrix, use_container_width=True, config={'displaylogo': False})
+        fig = chart_factory.create_vendor_comparison_chart(
+            vendor_summary,
+            top_n=10,
+            metric='total_order_value'
+        )
+        st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
     
     with col2:
-        st.markdown("### Vendor Distribution by Type")
+        st.markdown("### Conversion Rate Distribution")
+        top_10 = vendor_summary.nlargest(10, 'total_order_value')
         
-        # Vendor distribution sunburst
-        fig_dist = chart_factory.create_vendor_distribution(vendor_metrics)
-        st.plotly_chart(fig_dist, use_container_width=True, config={'displaylogo': False})
-    
-    # Performance distribution
-    st.markdown("---")
-    st.markdown("### Performance Distribution Analysis")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Performance score distribution
-        fig_score_dist = chart_factory.create_distribution_histogram(
-            vendor_metrics,
-            'performance_score',
-            bins=20,
-            title='Vendor Performance Score Distribution'
+        # Create simple bar chart for conversion rates
+        import plotly.express as px
+        fig_conv = px.bar(
+            top_10.sort_values('conversion_rate'),
+            x='conversion_rate',
+            y='vendor_name',
+            orientation='h',
+            title="Top 10 Vendors - Conversion Rate",
+            labels={'conversion_rate': 'Conversion %', 'vendor_name': ''},
+            color='conversion_rate',
+            color_continuous_scale='RdYlGn'
         )
-        st.plotly_chart(fig_score_dist, use_container_width=True, config={'displaylogo': False})
-    
-    with col2:
-        # Lead time box plot
-        fig_lead_time = chart_factory.create_box_plot(
-            vendor_metrics,
-            x_col='vendor_location_type',
-            y_col='avg_lead_time_days',
-            color_col='vendor_type',
-            title='Lead Time Distribution by Vendor Type'
-        )
-        st.plotly_chart(fig_lead_time, use_container_width=True, config={'displaylogo': False})
+        fig_conv.update_layout(height=400, showlegend=False)
+        st.plotly_chart(fig_conv, width='stretch', config=PLOTLY_CONFIG)
 
 
-def _render_single_vendor(vendor_metrics: pd.DataFrame, vendor_name: str) -> None:
+def _render_single_vendor_overview(
+    vendor_summary: pd.DataFrame,
+    po_data: pd.DataFrame,
+    vendor_name: str,
+    calc: PerformanceCalculator
+) -> None:
     """
-    Show detailed view for one vendor
+    Show overview for single vendor
     
     Args:
-        vendor_metrics: DataFrame with vendor metrics (already has performance_score)
-        vendor_name: Name of vendor to display
+        vendor_summary: Vendor summary data
+        po_data: PO data
+        vendor_name: Vendor name
+        calc: Calculator instance
     """
-    vendor_data = vendor_metrics[vendor_metrics['vendor_name'] == vendor_name]
+    vendor_data = vendor_summary[vendor_summary['vendor_name'] == vendor_name]
     
     if vendor_data.empty:
         st.warning(f"No data found for vendor: {vendor_name}")
@@ -171,204 +198,152 @@ def _render_single_vendor(vendor_metrics: pd.DataFrame, vendor_name: str) -> Non
     
     vendor_data = vendor_data.iloc[0]
     
-    # Get performance score (already calculated)
-    calc = PerformanceCalculator()
-    performance_score = vendor_data.get('performance_score', 0)
+    # Top section: Key metrics
+    st.markdown("### 🎯 Key Performance Metrics")
     
-    # Key metrics
-    st.markdown("### Key Performance Metrics")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.metric(
-            "Total Purchase Value",
-            f"${vendor_data.get('total_po_value', 0):,.0f}",
-            help="Total value of all POs in the period"
+            "💵 Total Order Entry",
+            format_currency(vendor_data['total_order_value']),
+            help="Total value of all purchase orders"
         )
     
     with col2:
-        on_time_rate = vendor_data.get('on_time_rate', 0)
         st.metric(
-            "On-Time Delivery",
-            f"{on_time_rate:.1f}%",
-            delta=f"{on_time_rate - 80:.1f}%",
-            delta_color="normal" if on_time_rate >= 80 else "inverse"
+            "📮 Invoiced Value",
+            format_currency(vendor_data['total_invoiced_value']),
+            delta=f"{vendor_data['conversion_rate']:.1f}% of order",
+            help="Total invoiced and delivered"
         )
     
     with col3:
-        completion_rate = vendor_data.get('completion_rate', 0)
         st.metric(
-            "Completion Rate",
-            f"{completion_rate:.1f}%",
-            help="Percentage of POs fully completed"
+            "⏳ Pending Delivery",
+            format_currency(vendor_data['pending_delivery_value']),
+            delta=f"{(vendor_data['pending_delivery_value']/vendor_data['total_order_value']*100):.1f}%",
+            delta_color="inverse",
+            help="Outstanding amount"
         )
+    
+    col4, col5, col6 = st.columns(3)
     
     with col4:
-        tier = calc.assign_performance_tier(performance_score)
         st.metric(
-            "Performance Score",
-            f"{performance_score:.1f}%",
-            help="Overall performance score (weighted)"
+            "📦 Total POs",
+            f"{int(vendor_data['total_pos']):,}",
+            help="Number of purchase orders"
         )
-        st.caption(tier)
     
-    # Additional metrics
+    with col5:
+        st.metric(
+            "🎯 Avg PO Value",
+            format_currency(vendor_data['avg_po_value']),
+            help="Average order size"
+        )
+    
+    with col6:
+        last_po = pd.to_datetime(vendor_data['last_po_date'])
+        days_ago = (pd.Timestamp.now() - last_po).days
+        st.metric(
+            "📅 Last Order",
+            last_po.strftime('%Y-%m-%d'),
+            delta=f"{days_ago} days ago",
+            help="Most recent purchase order"
+        )
+    
     st.markdown("---")
-    st.markdown("### Additional Metrics")
-    col1, col2, col3, col4 = st.columns(4)
+    
+    # Conversion gauge and progress
+    col1, col2 = st.columns([1, 2])
     
     with col1:
-        st.metric("Total POs", f"{vendor_data.get('total_pos', 0):,}")
+        st.markdown("#### Conversion Rate")
+        chart_factory = ChartFactory()
+        fig_gauge = chart_factory.create_conversion_gauge(vendor_data['conversion_rate'])
+        st.plotly_chart(fig_gauge, width='stretch', config=PLOTLY_CONFIG)
+        
+        tier = get_conversion_tier(vendor_data['conversion_rate'])
+        st.markdown(f"**Performance Tier:** {tier}")
     
     with col2:
-        st.metric("Completed POs", f"{vendor_data.get('completed_pos', 0):,}")
-    
-    with col3:
-        st.metric("Over Deliveries", f"{vendor_data.get('over_delivery_pos', 0):,}")
-    
-    with col4:
-        st.metric(
-            "Outstanding Amount",
-            f"${vendor_data.get('outstanding_invoices', 0):,.0f}"
+        st.markdown("#### 📊 Order → Invoice Breakdown")
+        
+        # Progress bar
+        conversion_pct = vendor_data['conversion_rate']
+        st.progress(min(conversion_pct / 100, 1.0))
+        st.caption(
+            f"{format_currency(vendor_data['total_invoiced_value'])} / "
+            f"{format_currency(vendor_data['total_order_value'])} "
+            f"({conversion_pct:.1f}%)"
         )
-
-
-def _render_performance_table(
-    vendor_metrics: pd.DataFrame,
-    selected_vendor: str
-) -> None:
-    """
-    Display performance comparison table
+        
+        # Breakdown metrics
+        st.markdown("")
+        metric_col1, metric_col2 = st.columns(2)
+        
+        with metric_col1:
+            st.markdown("**Vendor Info:**")
+            st.write(f"• Type: {vendor_data.get('vendor_type', 'N/A')}")
+            st.write(f"• Location: {vendor_data.get('vendor_location_type', 'N/A')}")
+            st.write(f"• Code: {vendor_data.get('vendor_code', 'N/A')}")
+        
+        with metric_col2:
+            st.markdown("**Status:**")
+            if conversion_pct >= 95:
+                st.success("⭐ Excellent performance")
+            elif conversion_pct >= 90:
+                st.info("✅ Good performance")
+            elif conversion_pct >= 80:
+                st.warning("⚠️ Fair performance")
+            else:
+                st.error("❌ Needs improvement")
     
-    Args:
-        vendor_metrics: DataFrame with vendor metrics (already has performance_score)
-        selected_vendor: Selected vendor name
-    """
-    st.markdown("### Vendor Performance Metrics")
+    st.markdown("---")
     
-    if vendor_metrics.empty:
-        st.info("No vendor metrics to display")
-        return
+    # Alerts section
+    alerts = calc.identify_alerts(vendor_data)
     
-    # Note: performance_score already calculated in render()
-    # Just need to add tier
-    calc = PerformanceCalculator()
-    display_metrics = vendor_metrics.copy()
+    if alerts:
+        st.markdown("#### ⚠️ Issues & Alerts")
+        
+        for alert in alerts:
+            if alert['severity'] == 'warning':
+                st.warning(f"⚠️ {alert['message']}")
+            elif alert['severity'] == 'error':
+                st.error(f"❌ {alert['message']}")
+            else:
+                st.info(f"ℹ️ {alert['message']}")
     
-    # Add performance tier
-    display_metrics['performance_tier'] = display_metrics['performance_score'].apply(
-        calc.assign_performance_tier
-    )
-    
-    # Select display columns
-    display_cols = [
-        'vendor_name', 'vendor_type', 'vendor_location_type',
-        'total_pos', 'completed_pos', 'on_time_rate',
-        'completion_rate', 'avg_over_delivery_percent',
-        'total_po_value', 'outstanding_invoices',
-        'performance_score', 'performance_tier'
-    ]
-    
-    # Filter existing columns
-    existing_cols = [col for col in display_cols if col in display_metrics.columns]
-    display_df = display_metrics[existing_cols].copy()
-    
-    # Rename columns for display
-    column_mapping = {
-        'vendor_name': 'Vendor',
-        'vendor_type': 'Type',
-        'vendor_location_type': 'Location',
-        'total_pos': 'Total POs',
-        'completed_pos': 'Completed',
-        'on_time_rate': 'On-Time %',
-        'completion_rate': 'Completion %',
-        'avg_over_delivery_percent': 'Avg Over %',
-        'total_po_value': 'Total Value',
-        'outstanding_invoices': 'Outstanding',
-        'performance_score': 'Score',
-        'performance_tier': 'Tier'
-    }
-    display_df.rename(columns=column_mapping, inplace=True)
-    
-    # Format numeric columns
-    if 'Total Value' in display_df.columns:
-        display_df['Total Value'] = display_df['Total Value'].apply(lambda x: f"${x:,.0f}")
-    if 'Outstanding' in display_df.columns:
-        display_df['Outstanding'] = display_df['Outstanding'].apply(lambda x: f"${x:,.0f}")
-    
-    # Sort by performance score
-    if 'Score' in display_df.columns:
-        display_df = display_df.sort_values('Score', ascending=False)
-    
-    # Display options
-    col1, col2, col3 = st.columns([1, 1, 2])
-    
-    with col1:
-        show_all = st.checkbox("Show All Vendors", value=False)
-        if not show_all:
-            num_vendors = st.slider("Number of Vendors", 10, 50, 20)
-            display_df = display_df.head(num_vendors)
-    
-    with col2:
-        if 'Tier' in display_df.columns:
-            filter_tier = st.multiselect(
-                "Filter by Tier",
-                options=['⭐ Excellent', '✅ Good', '⚠️ Fair', '❌ Poor'],
-                default=None
+    # Top products
+    if not po_data.empty:
+        vendor_po = po_data[po_data['vendor_name'] == vendor_name]
+        
+        if not vendor_po.empty:
+            st.markdown("---")
+            st.markdown("#### 📦 Top 3 Products")
+            
+            product_summary = vendor_po.groupby('product_name').agg({
+                'total_order_value_usd': 'sum',
+                'invoiced_amount_usd': 'sum'
+            }).reset_index()
+            
+            product_summary['pct_of_total'] = (
+                product_summary['total_order_value_usd'] / 
+                product_summary['total_order_value_usd'].sum() * 100
             )
-            if filter_tier:
-                display_df = display_df[display_df['Tier'].isin(filter_tier)]
-    
-    with col3:
-        # Export button
-        csv = display_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Performance Metrics",
-            data=csv,
-            file_name=f"vendor_performance_metrics_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime='text/csv'
-        )
-    
-    # Display the dataframe
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        height=600,
-        hide_index=True
-    )
-    
-    # Summary statistics
-    st.markdown("---")
-    st.markdown("#### Performance Summary Statistics")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if 'Tier' in display_df.columns:
-            tier_dist = display_df['Tier'].value_counts()
-            st.markdown("**Tier Distribution**")
-            for tier, count in tier_dist.items():
-                st.write(f"{tier}: {count}")
-    
-    with col2:
-        st.markdown("**Average Metrics**")
-        if 'on_time_rate' in vendor_metrics.columns:
-            st.write(f"On-Time: {vendor_metrics['on_time_rate'].mean():.1f}%")
-        if 'completion_rate' in vendor_metrics.columns:
-            st.write(f"Completion: {vendor_metrics['completion_rate'].mean():.1f}%")
-        if 'avg_lead_time_days' in vendor_metrics.columns:
-            st.write(f"Lead Time: {vendor_metrics['avg_lead_time_days'].mean():.1f} days")
-    
-    with col3:
-        st.markdown("**By Location**")
-        if 'vendor_location_type' in vendor_metrics.columns and 'performance_score' in vendor_metrics.columns:
-            location_avg = vendor_metrics.groupby('vendor_location_type')['performance_score'].mean()
-            for loc, avg in location_avg.items():
-                st.write(f"{loc}: {avg:.1f}%")
-    
-    with col4:
-        st.markdown("**By Type**")
-        if 'vendor_type' in vendor_metrics.columns and 'performance_score' in vendor_metrics.columns:
-            type_avg = vendor_metrics.groupby('vendor_type')['performance_score'].mean()
-            for vtype, avg in type_avg.items():
-                st.write(f"{vtype}: {avg:.1f}%")
+            
+            top_3 = product_summary.nlargest(3, 'total_order_value_usd')
+            
+            for idx, row in top_3.iterrows():
+                col1, col2, col3 = st.columns([3, 1, 1])
+                
+                with col1:
+                    st.write(f"**{row['product_name']}**")
+                
+                with col2:
+                    st.write(format_currency(row['total_order_value_usd']))
+                
+                with col3:
+                    st.write(f"{row['pct_of_total']:.1f}%")

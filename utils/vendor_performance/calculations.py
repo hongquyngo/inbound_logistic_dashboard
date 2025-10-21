@@ -1,173 +1,65 @@
 """
-Calculation and Business Logic for Vendor Performance
+Simplified Calculation Logic for Vendor Performance
 
-Handles all performance calculations, aggregations, and business rules.
+Focused on key business metrics:
+- Order Entry vs Invoiced
+- Conversion Rate
+- Pending Delivery
+- Trends
 """
 
 import pandas as pd
 import numpy as np
-from typing import Tuple, Dict, Any
+from typing import Dict, Any, List
 import logging
+
+from .exceptions import CalculationError, ValidationError
+from .constants import format_currency, format_percentage, CONVERSION_THRESHOLDS
 
 logger = logging.getLogger(__name__)
 
 
 class PerformanceCalculator:
-    """Calculator for vendor performance metrics and business logic"""
+    """Simplified calculator for vendor performance metrics"""
     
     @staticmethod
-    def calculate_performance_score(vendor_metrics: pd.DataFrame) -> pd.DataFrame:
+    def calculate_conversion_rate(
+        invoiced_value: float,
+        order_value: float
+    ) -> float:
         """
-        Calculate weighted performance score for vendors
-        
-        Weights:
-        - On-time delivery: 40%
-        - Completion rate: 30%
-        - No over-delivery penalty: 20%
-        - Payment progress: 10%
+        Calculate conversion rate (Invoiced / Order * 100)
         
         Args:
-            vendor_metrics: DataFrame with vendor metrics
+            invoiced_value: Total invoiced amount
+            order_value: Total order entry amount
             
         Returns:
-            DataFrame with added performance_score column
+            Conversion rate percentage
         """
-        if vendor_metrics.empty:
-            return vendor_metrics
-        
-        df = vendor_metrics.copy()
-        
-        # Ensure required columns exist
-        required_cols = ['on_time_rate', 'completion_rate', 'over_delivery_rate', 'avg_payment_progress']
-        for col in required_cols:
-            if col not in df.columns:
-                df[col] = 0
-        
-        # Calculate weighted score
-        df['performance_score'] = (
-            df['on_time_rate'] * 0.4 +                          # 40% weight
-            df['completion_rate'] * 0.3 +                       # 30% weight
-            (100 - df['over_delivery_rate'].clip(upper=100)) * 0.2 +  # 20% weight
-            df['avg_payment_progress'].fillna(0).clip(upper=100) * 0.1    # 10% weight
-        ).round(1)
-        
-        logger.info(f"Calculated performance scores for {len(df)} vendors")
-        return df
-    
-    @staticmethod
-    def assign_performance_tier(score: float) -> str:
-        """
-        Categorize vendor performance based on score
-        
-        Tiers:
-        - Excellent: >= 90
-        - Good: >= 75
-        - Fair: >= 60
-        - Poor: < 60
-        
-        Args:
-            score: Performance score (0-100)
-            
-        Returns:
-            Performance tier label
-        """
-        if score >= 90:
-            return "⭐ Excellent"
-        elif score >= 75:
-            return "✅ Good"
-        elif score >= 60:
-            return "⚠️ Fair"
-        else:
-            return "❌ Poor"
-    
-    @staticmethod
-    def calculate_on_time_rate(po_df: pd.DataFrame) -> float:
-        """
-        Calculate on-time delivery rate
-        
-        Args:
-            po_df: DataFrame with PO data
-            
-        Returns:
-            On-time rate percentage
-        """
-        if po_df.empty:
+        if pd.isna(order_value) or order_value == 0:
             return 0.0
         
-        completed = po_df[po_df['status'] == 'COMPLETED']
-        if len(completed) == 0:
-            return 0.0
-        
-        on_time = completed[
-            (pd.to_datetime(completed['eta']) >= pd.to_datetime(completed['etd']))
-        ]
-        
-        rate = (len(on_time) / len(completed) * 100).round(1)
-        return rate
+        rate = (invoiced_value / order_value * 100)
+        return round(rate, 1)
     
     @staticmethod
-    def calculate_completion_rate(po_df: pd.DataFrame) -> float:
+    def calculate_pending_delivery(
+        order_value: float,
+        invoiced_value: float
+    ) -> float:
         """
-        Calculate PO completion rate
+        Calculate pending delivery value
         
         Args:
-            po_df: DataFrame with PO data
+            order_value: Total order value
+            invoiced_value: Total invoiced value
             
         Returns:
-            Completion rate percentage
+            Pending delivery amount
         """
-        if po_df.empty:
-            return 0.0
-        
-        total_pos = po_df['po_number'].nunique()
-        if total_pos == 0:
-            return 0.0
-        
-        completed_pos = po_df[po_df['status'] == 'COMPLETED']['po_number'].nunique()
-        
-        rate = (completed_pos / total_pos * 100).round(1)
-        return rate
-    
-    @staticmethod
-    def calculate_growth_metrics(
-        current_df: pd.DataFrame,
-        previous_df: pd.DataFrame
-    ) -> Dict[str, float]:
-        """
-        Calculate period-over-period growth metrics
-        
-        Args:
-            current_df: Current period data
-            previous_df: Previous period data
-            
-        Returns:
-            Dictionary with growth metrics
-        """
-        current_value = current_df['total_amount_usd'].sum() if not current_df.empty else 0
-        previous_value = previous_df['total_amount_usd'].sum() if not previous_df.empty else 0
-        
-        current_pos = current_df['po_number'].nunique() if not current_df.empty else 0
-        previous_pos = previous_df['po_number'].nunique() if not previous_df.empty else 0
-        
-        # Calculate growth rates
-        value_growth = (
-            ((current_value - previous_value) / previous_value * 100) 
-            if previous_value > 0 else 0
-        )
-        
-        po_growth = (
-            ((current_pos - previous_pos) / previous_pos * 100) 
-            if previous_pos > 0 else 0
-        )
-        
-        return {
-            'current_value': current_value,
-            'previous_value': previous_value,
-            'value_growth': round(value_growth, 1),
-            'current_pos': current_pos,
-            'previous_pos': previous_pos,
-            'po_growth': round(po_growth, 1)
-        }
+        pending = order_value - invoiced_value
+        return max(0, round(pending, 2))
     
     @staticmethod
     def aggregate_by_period(
@@ -180,126 +72,229 @@ class PerformanceCalculator:
         
         Args:
             po_df: DataFrame with PO data
-            period_type: 'daily', 'weekly', 'monthly', 'quarterly', 'yearly'
-            date_column: Name of date column to use
+            period_type: 'monthly', 'quarterly', 'yearly'
+            date_column: Date column name
             
         Returns:
-            Aggregated DataFrame by period
+            Aggregated DataFrame
+            
+        Raises:
+            CalculationError: If aggregation fails
         """
         if po_df.empty:
             return pd.DataFrame()
         
-        df = po_df.copy()
-        df[date_column] = pd.to_datetime(df[date_column])
+        try:
+            df = po_df.copy()
+            
+            # Ensure date column is datetime
+            if date_column not in df.columns:
+                raise ValidationError(f"Column {date_column} not found in DataFrame")
+            
+            df[date_column] = pd.to_datetime(df[date_column])
+            
+            # Create period column
+            period_map = {
+                'monthly': 'M',
+                'quarterly': 'Q',
+                'yearly': 'Y'
+            }
+            
+            period_code = period_map.get(period_type.lower(), 'M')
+            df['period'] = df[date_column].dt.to_period(period_code).dt.start_time
+            
+            # Aggregate
+            aggregated = df.groupby(['period', 'vendor_name']).agg({
+                'po_number': 'nunique',
+                'total_order_value_usd': 'sum',
+                'invoiced_amount_usd': 'sum',
+                'pending_delivery_usd': 'sum',
+                'po_line_id': 'count',
+                'product_name': 'nunique'
+            }).reset_index()
+            
+            # Rename columns
+            aggregated.columns = [
+                'Period', 'Vendor', 'PO Count', 'Order Value', 
+                'Invoiced Value', 'Pending Delivery',
+                'Line Items', 'Products'
+            ]
+            
+            # Calculate conversion rate
+            aggregated['Conversion Rate'] = aggregated.apply(
+                lambda row: PerformanceCalculator.calculate_conversion_rate(
+                    row['Invoiced Value'], 
+                    row['Order Value']
+                ),
+                axis=1
+            )
+            
+            logger.info(f"Aggregated {len(df)} records into {len(aggregated)} periods")
+            return aggregated
+            
+        except Exception as e:
+            logger.error(f"Error aggregating by period: {e}", exc_info=True)
+            raise CalculationError("Failed to aggregate data by period", {'error': str(e)})
+    
+    @staticmethod
+    def calculate_growth_metrics(
+        current_value: float,
+        previous_value: float
+    ) -> Dict[str, Any]:
+        """
+        Calculate growth metrics
         
-        # Create period column
-        if period_type == 'daily':
-            df['period'] = df[date_column].dt.date
-        elif period_type == 'weekly':
-            df['period'] = df[date_column].dt.to_period('W').dt.start_time
-        elif period_type == 'monthly':
-            df['period'] = df[date_column].dt.to_period('M').dt.start_time
-        elif period_type == 'quarterly':
-            df['period'] = df[date_column].dt.to_period('Q').dt.start_time
-        elif period_type == 'yearly':
-            df['period'] = df[date_column].dt.to_period('Y').dt.start_time
+        Args:
+            current_value: Current period value
+            previous_value: Previous period value
+            
+        Returns:
+            Dictionary with growth metrics
+        """
+        if previous_value == 0 or pd.isna(previous_value):
+            growth_rate = 0 if current_value == 0 else 100
         else:
-            df['period'] = df[date_column].dt.to_period('M').dt.start_time
-        
-        # Aggregate by period
-        aggregated = df.groupby(['period', 'vendor_name']).agg({
-            'po_number': 'nunique',
-            'total_amount_usd': 'sum',
-            'po_line_id': 'count',
-            'brand': lambda x: x.nunique() if pd.api.types.is_object_dtype(x) else 0,
-            'product_name': 'nunique'
-        }).reset_index()
-        
-        aggregated.columns = [
-            'Period', 'Vendor', 'PO Count', 'Total Value', 
-            'Line Items', 'Brands', 'Products'
-        ]
-        
-        logger.info(f"Aggregated {len(df)} records into {len(aggregated)} periods")
-        return aggregated
-    
-    @staticmethod
-    def format_currency(value: float, currency: str = 'USD') -> str:
-        """
-        Format currency value consistently
-        
-        Args:
-            value: Numeric value
-            currency: Currency code
-            
-        Returns:
-            Formatted string
-        """
-        if pd.isna(value):
-            return "$0"
-        
-        if abs(value) >= 1_000_000:
-            return f"${value/1_000_000:.1f}M"
-        elif abs(value) >= 1_000:
-            return f"${value/1_000:.1f}K"
-        else:
-            return f"${value:.0f}"
-    
-    @staticmethod
-    def format_percentage(value: float) -> str:
-        """
-        Format percentage value
-        
-        Args:
-            value: Percentage value (0-100)
-            
-        Returns:
-            Formatted string
-        """
-        if pd.isna(value):
-            return "0.0%"
-        return f"{value:.1f}%"
-    
-    @staticmethod
-    def get_performance_color(score: float) -> str:
-        """
-        Get color code for performance score
-        
-        Args:
-            score: Performance score (0-100)
-            
-        Returns:
-            Hex color code
-        """
-        if score >= 90:
-            return "#2ecc71"  # Green - Excellent
-        elif score >= 75:
-            return "#3498db"  # Blue - Good
-        elif score >= 60:
-            return "#f39c12"  # Orange - Fair
-        else:
-            return "#e74c3c"  # Red - Poor
-    
-    @staticmethod
-    def calculate_vendor_summary(vendor_metrics: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Calculate summary statistics for all vendors
-        
-        Args:
-            vendor_metrics: DataFrame with vendor metrics
-            
-        Returns:
-            Dictionary with summary statistics
-        """
-        if vendor_metrics.empty:
-            return {}
+            growth_rate = ((current_value - previous_value) / previous_value * 100)
         
         return {
-            'total_vendors': len(vendor_metrics),
-            'avg_on_time_rate': vendor_metrics['on_time_rate'].mean(),
-            'avg_completion_rate': vendor_metrics['completion_rate'].mean(),
-            'total_po_value': vendor_metrics['total_po_value'].sum(),
-            'total_outstanding': vendor_metrics['outstanding_arrival_value'].sum(),
-            'high_performers': len(vendor_metrics[vendor_metrics['performance_score'] >= 80]),
-            'poor_performers': len(vendor_metrics[vendor_metrics['performance_score'] < 60])
+            'current': round(current_value, 2),
+            'previous': round(previous_value, 2),
+            'growth_rate': round(growth_rate, 1),
+            'growth_amount': round(current_value - previous_value, 2)
+        }
+    
+    @staticmethod
+    def calculate_vendor_comparison(
+        vendor_df: pd.DataFrame,
+        all_vendors_df: pd.DataFrame
+    ) -> Dict[str, Any]:
+        """
+        Calculate vendor comparison vs overall average
+        
+        Args:
+            vendor_df: Single vendor data
+            all_vendors_df: All vendors data
+            
+        Returns:
+            Comparison metrics
+        """
+        if vendor_df.empty or all_vendors_df.empty:
+            return {}
+        
+        vendor_metrics = {
+            'order_value': vendor_df['total_order_value'].sum(),
+            'invoiced_value': vendor_df['total_invoiced_value'].sum(),
+            'conversion_rate': PerformanceCalculator.calculate_conversion_rate(
+                vendor_df['total_invoiced_value'].sum(),
+                vendor_df['total_order_value'].sum()
+            ),
+            'po_count': vendor_df['total_pos'].sum()
+        }
+        
+        avg_metrics = {
+            'avg_order_value': all_vendors_df['total_order_value'].mean(),
+            'avg_conversion_rate': all_vendors_df['conversion_rate'].mean(),
+            'avg_po_count': all_vendors_df['total_pos'].mean()
+        }
+        
+        return {
+            'vendor': vendor_metrics,
+            'average': avg_metrics,
+            'vs_average': {
+                'conversion_diff': round(
+                    vendor_metrics['conversion_rate'] - avg_metrics['avg_conversion_rate'], 
+                    1
+                ),
+                'value_diff_pct': round(
+                    (vendor_metrics['order_value'] / avg_metrics['avg_order_value'] - 1) * 100,
+                    1
+                ) if avg_metrics['avg_order_value'] > 0 else 0
+            }
+        }
+    
+    @staticmethod
+    def identify_alerts(vendor_summary: pd.Series) -> List[Dict[str, Any]]:
+        """
+        Identify performance alerts
+        
+        Args:
+            vendor_summary: Vendor summary data
+            
+        Returns:
+            List of alerts
+        """
+        alerts = []
+        
+        # Low conversion rate
+        conversion_rate = vendor_summary.get('conversion_rate', 0)
+        if conversion_rate < CONVERSION_THRESHOLDS['fair']:
+            alerts.append({
+                'type': 'low_conversion',
+                'severity': 'warning',
+                'message': f'Conversion rate {conversion_rate:.1f}% below target ({CONVERSION_THRESHOLDS["fair"]}%)',
+                'value': conversion_rate
+            })
+        
+        # High pending delivery
+        pending = vendor_summary.get('pending_delivery_value', 0)
+        if pending > 100000:  # > $100K
+            alerts.append({
+                'type': 'high_pending',
+                'severity': 'warning',
+                'message': f'High pending delivery: {format_currency(pending)}',
+                'value': pending
+            })
+        
+        # No recent orders (if last_po_date available)
+        if 'last_po_date' in vendor_summary:
+            last_po = pd.to_datetime(vendor_summary['last_po_date'])
+            days_since = (pd.Timestamp.now() - last_po).days
+            if days_since > 90:
+                alerts.append({
+                    'type': 'inactive',
+                    'severity': 'info',
+                    'message': f'No orders in last {days_since} days',
+                    'value': days_since
+                })
+        
+        return alerts
+    
+    @staticmethod
+    def calculate_cumulative(df: pd.DataFrame, value_column: str) -> pd.DataFrame:
+        """
+        Calculate cumulative sum for time series
+        
+        Args:
+            df: DataFrame with period data
+            value_column: Column to accumulate
+            
+        Returns:
+            DataFrame with cumulative column added
+        """
+        if df.empty or value_column not in df.columns:
+            return df
+        
+        df = df.sort_values('Period')
+        df[f'{value_column}_cumulative'] = df[value_column].cumsum()
+        
+        return df
+    
+    @staticmethod
+    def format_summary_stats(vendor_summary: pd.Series) -> Dict[str, str]:
+        """
+        Format summary statistics for display
+        
+        Args:
+            vendor_summary: Vendor summary data
+            
+        Returns:
+            Formatted statistics
+        """
+        return {
+            'Total Order Value': format_currency(vendor_summary.get('total_order_value', 0)),
+            'Invoiced Value': format_currency(vendor_summary.get('total_invoiced_value', 0)),
+            'Pending Delivery': format_currency(vendor_summary.get('pending_delivery_value', 0)),
+            'Conversion Rate': format_percentage(vendor_summary.get('conversion_rate', 0)),
+            'Total POs': f"{vendor_summary.get('total_pos', 0):,}",
+            'Avg PO Value': format_currency(vendor_summary.get('avg_po_value', 0))
         }

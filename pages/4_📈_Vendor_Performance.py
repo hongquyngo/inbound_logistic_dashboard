@@ -1,7 +1,16 @@
 """
-Vendor Performance Analysis Page
+Vendor Performance Analysis Page - Refactored
 
-Main page for vendor performance analytics and reporting.
+Simplified dashboard focused on key business metrics:
+- Order Entry Value
+- Invoiced Value  
+- Pending Delivery
+- Conversion Rate
+
+3 Tabs:
+1. Overview - Snapshot dashboard
+2. Financial Performance - Order entry vs invoiced trends
+3. Product Mix - Product-level analysis
 """
 
 import streamlit as st
@@ -9,18 +18,16 @@ import pandas as pd
 from datetime import datetime
 import logging
 
-# Explicit imports from vendor_performance modules
+# Explicit imports
 from utils.auth import AuthManager
 from utils.vendor_performance.data_access import VendorPerformanceDAO
 from utils.vendor_performance.calculations import PerformanceCalculator
+from utils.vendor_performance.exceptions import DataAccessError, VendorPerformanceError
 
-# Import tab modules directly
+# Import tab modules
 from utils.vendor_performance.tabs import tab_overview
-from utils.vendor_performance.tabs import tab_purchase
-from utils.vendor_performance.tabs import tab_performance
+from utils.vendor_performance.tabs import tab_financial
 from utils.vendor_performance.tabs import tab_product
-from utils.vendor_performance.tabs import tab_payment
-from utils.vendor_performance.tabs import tab_export
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,21 +47,31 @@ if not auth_manager.check_session():
     st.stop()
 
 # Initialize DAO
-dao = VendorPerformanceDAO()
+try:
+    dao = VendorPerformanceDAO()
+except Exception as e:
+    st.error("Failed to initialize database connection")
+    logger.error(f"DAO initialization failed: {e}")
+    st.stop()
 
 # Header
 st.title("🏭 Vendor Performance Analysis")
-st.markdown("Comprehensive analytics for vendor performance, purchasing patterns, and negotiations")
+st.markdown("Simplified analytics focused on order entry, invoiced value, and conversion rates")
 
-# Filters Section
+# ==================== FILTERS SECTION ====================
 st.markdown("---")
-st.subheader("📊 Analysis Configuration")
+st.subheader("🔧 Configuration")
 
 col1, col2, col3 = st.columns([2, 1, 1])
 
 with col1:
     # Vendor selection
-    vendor_options = dao.get_vendor_list()
+    try:
+        vendor_options = dao.get_vendor_list()
+    except DataAccessError as e:
+        st.error("Failed to load vendor list")
+        logger.error(f"Vendor list error: {e}")
+        vendor_options = []
     
     if vendor_options:
         vendor_display_options = ["All Vendors"] + vendor_options
@@ -85,14 +102,17 @@ with col3:
         help="Number of months to analyze"
     )
 
-# Advanced filters (optional)
+# Advanced filters (collapsed by default)
 with st.expander("🔍 Advanced Filters", expanded=False):
     col1, col2, col3 = st.columns(3)
     
-    with col1:
-        # Get filter options
+    try:
         filter_options = dao.get_filter_options()
-        
+    except Exception as e:
+        logger.warning(f"Failed to load filter options: {e}")
+        filter_options = {}
+    
+    with col1:
         vendor_types = st.multiselect(
             "Vendor Type",
             options=filter_options.get('vendor_types', []),
@@ -102,7 +122,7 @@ with st.expander("🔍 Advanced Filters", expanded=False):
     with col2:
         vendor_locations = st.multiselect(
             "Vendor Location",
-            options=filter_options.get('vendor_location_types', []),
+            options=filter_options.get('vendor_locations', []),
             default=None
         )
     
@@ -122,107 +142,124 @@ if selected_vendor_display != "All Vendors":
     else:
         selected_vendor_name = selected_vendor_display.strip()
 
-# Load data
+# ==================== LOAD DATA ====================
 st.markdown("---")
 
 with st.spinner("Loading vendor performance data..."):
     try:
-        # Load vendor metrics
-        if selected_vendor_name:
-            vendor_metrics = dao.get_vendor_metrics(
-                vendor_name=selected_vendor_name,
-                months=months_back
-            )
-            
-            # Load PO data with vendor filter
-            po_data = dao.get_po_data({
-                'vendors': [selected_vendor_display]
-            })
-        else:
-            # Load all vendors
-            vendor_metrics = dao.get_vendor_metrics(months=months_back)
-            po_data = dao.get_po_data()
+        # Load vendor summary
+        vendor_summary = dao.get_vendor_summary(
+            vendor_name=selected_vendor_name,
+            months=months_back
+        )
+        
+        # Load PO data
+        po_data = dao.get_po_data(
+            vendor_name=selected_vendor_name,
+            months=months_back,
+            filters={
+                'vendor_types': vendor_types if vendor_types else None,
+                'vendor_locations': vendor_locations if vendor_locations else None,
+                'payment_terms': payment_terms if payment_terms else None
+            }
+        )
         
         # Validate data
-        if vendor_metrics is None:
-            vendor_metrics = pd.DataFrame()
+        if vendor_summary is None:
+            vendor_summary = pd.DataFrame()
         if po_data is None:
             po_data = pd.DataFrame()
         
-        # Apply advanced filters if specified
-        if not po_data.empty:
-            if vendor_types:
-                po_data = po_data[po_data['vendor_type'].isin(vendor_types)]
-            if vendor_locations:
-                po_data = po_data[po_data['vendor_location_type'].isin(vendor_locations)]
-            if payment_terms:
-                po_data = po_data[po_data['payment_term'].isin(payment_terms)]
-        
-    except Exception as e:
-        logger.error(f"Error loading vendor data: {e}")
+    except DataAccessError as e:
         st.error(f"Failed to load data: {str(e)}")
-        vendor_metrics = pd.DataFrame()
+        logger.error(f"Data loading error: {e}", exc_info=True)
+        vendor_summary = pd.DataFrame()
+        po_data = pd.DataFrame()
+    except Exception as e:
+        st.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {e}", exc_info=True)
+        vendor_summary = pd.DataFrame()
         po_data = pd.DataFrame()
 
 # Check if we have data
-if vendor_metrics.empty and po_data.empty:
+if vendor_summary.empty and po_data.empty:
     st.warning("⚠️ No data available for the selected criteria. Please adjust your filters.")
     st.stop()
 
-# Data summary
+# ==================== DATA SUMMARY ====================
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("Vendors Loaded", len(vendor_metrics))
+    vendor_count = len(vendor_summary) if not vendor_summary.empty else 0
+    st.metric("Vendors Loaded", f"{vendor_count:,}")
 
 with col2:
-    st.metric("PO Records", len(po_data))
+    po_count = len(po_data) if not po_data.empty else 0
+    st.metric("PO Records", f"{po_count:,}")
 
 with col3:
-    if not vendor_metrics.empty:
-        total_value = vendor_metrics['total_po_value'].sum()
-        st.metric("Total Value", f"${total_value/1000000:.1f}M")
+    if not vendor_summary.empty:
+        total_value = vendor_summary['total_order_value'].sum()
+        st.metric("Total Order Value", f"${total_value/1000000:.1f}M")
     else:
-        st.metric("Total Value", "$0")
+        st.metric("Total Order Value", "$0")
 
 with col4:
-    if not vendor_metrics.empty:
-        avg_score = vendor_metrics.get('on_time_rate', pd.Series([0])).mean()
-        st.metric("Avg On-Time Rate", f"{avg_score:.1f}%")
+    if not vendor_summary.empty:
+        avg_conversion = vendor_summary['conversion_rate'].mean()
+        st.metric(
+            "Avg Conversion", 
+            f"{avg_conversion:.1f}%",
+            delta=f"{avg_conversion - 90:.1f}% vs target",
+            delta_color="normal" if avg_conversion >= 90 else "inverse"
+        )
     else:
-        st.metric("Avg On-Time Rate", "N/A")
+        st.metric("Avg Conversion", "N/A")
 
-# Tabs
+# ==================== TABS ====================
 st.markdown("---")
 
 tabs = st.tabs([
     "📊 Overview",
-    "💰 Purchase Analysis",
-    "📈 Performance Trends",
-    "📦 Product Analysis",
-    "💳 Payment Analysis",
-    "📄 Export Report"
+    "💰 Financial Performance",
+    "📦 Product Mix"
 ])
 
 with tabs[0]:
-    tab_overview.render(vendor_metrics, po_data, selected_vendor_name or "All Vendors")
+    try:
+        tab_overview.render(
+            vendor_summary,
+            po_data,
+            selected_vendor_name or "All Vendors"
+        )
+    except Exception as e:
+        st.error(f"Error rendering Overview tab: {str(e)}")
+        logger.error(f"Overview tab error: {e}", exc_info=True)
 
 with tabs[1]:
-    tab_purchase.render(po_data, period_type, selected_vendor_name or "All Vendors")
+    try:
+        tab_financial.render(
+            vendor_summary,
+            po_data,
+            period_type,
+            selected_vendor_name or "All Vendors"
+        )
+    except Exception as e:
+        st.error(f"Error rendering Financial Performance tab: {str(e)}")
+        logger.error(f"Financial tab error: {e}", exc_info=True)
 
 with tabs[2]:
-    tab_performance.render(vendor_metrics, po_data, selected_vendor_name or "All Vendors")
+    try:
+        tab_product.render(
+            po_data,
+            selected_vendor_name or "All Vendors",
+            dao  # Pass DAO for product summary query
+        )
+    except Exception as e:
+        st.error(f"Error rendering Product Mix tab: {str(e)}")
+        logger.error(f"Product tab error: {e}", exc_info=True)
 
-with tabs[3]:
-    tab_product.render(po_data, selected_vendor_name or "All Vendors")
-
-with tabs[4]:
-    tab_payment.render(po_data, selected_vendor_name or "All Vendors")
-
-with tabs[5]:
-    tab_export.render(vendor_metrics, po_data, selected_vendor_name or "All Vendors")
-
-# Footer
+# ==================== FOOTER ====================
 st.markdown("---")
 col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -231,24 +268,47 @@ with col1:
 
 with col2:
     if st.button("🔄 Refresh Data"):
-        st.cache_data.clear()
+        # Clear specific caches
+        try:
+            dao.get_vendor_list.clear()
+            dao.get_vendor_summary.clear()
+            dao.get_po_data.clear()
+            dao.get_product_summary.clear()
+        except:
+            pass
         st.rerun()
 
 with col3:
     if st.button("📋 Help"):
         st.info("""
-        **How to use Vendor Performance Analysis:**
+        **Vendor Performance Analysis - User Guide:**
         
-        1. Select a vendor or view all vendors
-        2. Choose analysis period (Monthly/Quarterly/Yearly)
-        3. Set time range (months back to analyze)
-        4. Navigate through tabs for different insights
-        5. Export reports from the Export tab
+        **Overview Tab:**
+        - Quick snapshot of vendor performance
+        - Key metrics: Order Value, Invoiced, Pending, Conversion
+        - Alerts and top products
+        
+        **Financial Performance Tab:**
+        - Detailed order entry vs invoiced trends
+        - Periodic and cumulative views
+        - Monthly breakdown table
+        - Period-over-period comparison
+        
+        **Product Mix Tab:**
+        - Product-level performance
+        - Visual treemap of product portfolio
+        - Product detail drill-down
+        - Recent order history
+        
+        **Key Metrics:**
+        - **Order Entry Value**: Total value of purchase orders
+        - **Invoiced Value**: Amount actually delivered/invoiced
+        - **Pending Delivery**: Outstanding amount (Order - Invoiced)
+        - **Conversion Rate**: Invoiced / Order Entry × 100%
         
         **Tips:**
-        - Use Overview tab for quick summary
-        - Purchase Analysis shows spending patterns
-        - Performance Trends reveal delivery reliability
-        - Product Analysis shows product mix
-        - Payment Analysis tracks financial terms
+        - Target conversion rate: ≥ 90%
+        - Use filters to narrow down analysis
+        - Download data for offline analysis
+        - Refresh data to get latest updates
         """)
