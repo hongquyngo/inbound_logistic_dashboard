@@ -1,8 +1,11 @@
 """
-Order Analysis Tab
+Order Analysis Tab - Fixed Deprecations
 
 Analyzes purchase orders by PO date
 Tracks order lifecycle: Order Entry → Invoice → Payment
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import streamlit as st
@@ -11,8 +14,8 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Dict, Any
 
 from ..calculations import PerformanceCalculator
-from ..visualizations import ChartFactory
-from ..constants import format_currency, format_percentage, COLORS, PLOTLY_CONFIG
+from ..visualizations import ChartFactory, render_chart
+from ..constants import format_currency, format_percentage, COLORS
 
 if TYPE_CHECKING:
     from ..data_access import VendorPerformanceDAO
@@ -134,7 +137,12 @@ def render(
     total_outstanding = summary_df['outstanding_value'].sum()
     avg_conversion = summary_df['conversion_rate'].mean()
     total_pos = summary_df['total_pos'].sum()
-    vendor_count = len(summary_df)
+    
+    # Fix vendor count: if specific vendor selected, show 1, otherwise show actual count
+    if vendor_display != "All Vendors" and filters.get('vendor_name'):
+        vendor_count = 1
+    else:
+        vendor_count = len(summary_df)
     
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
@@ -221,7 +229,7 @@ def _render_all_vendors_view(
             top_n=10,
             metric='total_order_value'
         )
-        st.plotly_chart(fig_vendors, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_vendors, key="chart_vendors_order")
     
     with col2:
         # Conversion rate distribution
@@ -239,7 +247,7 @@ def _render_all_vendors_view(
             range_color=[0, 100]
         )
         fig_conv.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_conv, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_conv, key="chart_conversion_order")
     
     st.markdown("---")
     
@@ -270,7 +278,7 @@ def _render_all_vendors_view(
             trend_data,
             show_cumulative=False
         )
-        st.plotly_chart(fig_trend, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_trend, key="chart_trend_order")
     
     st.markdown("---")
     
@@ -289,6 +297,7 @@ def _render_all_vendors_view(
         'outstanding_value', 'conversion_rate'
     ]
     
+    # Use new width parameter instead of deprecated use_container_width
     st.dataframe(
         display_df[display_cols],
         width='stretch',
@@ -366,7 +375,7 @@ def _render_single_vendor_view(
         # Conversion gauge
         chart_factory = ChartFactory()
         fig_gauge = chart_factory.create_conversion_gauge(vendor_data['conversion_rate'])
-        st.plotly_chart(fig_gauge, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_gauge, key="gauge_vendor_conversion")
     
     st.markdown("---")
     
@@ -387,7 +396,7 @@ def _render_single_vendor_view(
             period_data,
             show_cumulative=False
         )
-        st.plotly_chart(fig_trend, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_trend, key="chart_vendor_trend")
     
     st.markdown("---")
     
@@ -410,6 +419,7 @@ def _render_single_vendor_view(
         'outstanding_invoiced_amount_usd', 'line_conversion_rate', 'status'
     ]
     
+    # Use new width parameter instead of deprecated use_container_width
     st.dataframe(
         display_df[display_cols],
         width='stretch',

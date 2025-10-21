@@ -1,8 +1,12 @@
 """
-Invoice Analysis Tab
+Invoice Analysis Tab - Clean Version
 
 Analyzes invoices by invoice date
 Focuses on payment status, aging, and cash flow
+All deprecations fixed
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import streamlit as st
@@ -12,7 +16,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Dict, Any
 
-from ..constants import format_currency, format_percentage, COLORS, PLOTLY_CONFIG
+from ..visualizations import render_chart
+from ..constants import format_currency, format_percentage, COLORS
 
 if TYPE_CHECKING:
     from ..data_access import VendorPerformanceDAO
@@ -137,7 +142,12 @@ def render(
     overdue_amount = summary_df['overdue_amount'].sum()
     avg_payment_rate = summary_df['payment_rate'].mean()
     total_invoices = summary_df['total_invoices'].sum()
-    vendor_count = len(summary_df)
+    
+    # Fix vendor count: if specific vendor selected, show 1, otherwise show actual count
+    if vendor_display != "All Vendors" and filters.get('vendor_name'):
+        vendor_count = 1
+    else:
+        vendor_count = len(summary_df)
     
     col1, col2, col3, col4, col5, col6 = st.columns(6)
     
@@ -183,7 +193,7 @@ def render(
         st.metric(
             "Overdue",
             format_currency(overdue_amount, compact=True),
-            delta="⚠️" if overdue_amount > 0 else "✓",
+            delta="⚠️" if overdue_amount > 0 else "✔",
             delta_color="inverse" if overdue_amount > 0 else "normal",
             help="Overdue invoices"
         )
@@ -229,7 +239,7 @@ def _render_summary_view(
                 range_color=[0, 100]
             )
             fig.update_layout(height=400)
-            st.plotly_chart(fig, width='stretch', config=PLOTLY_CONFIG)
+            render_chart(fig, key="chart_invoice_vendors")
         
         with col2:
             # Payment status breakdown
@@ -253,7 +263,7 @@ def _render_summary_view(
                 title="Payment Status Distribution",
                 height=400
             )
-            st.plotly_chart(fig_status, width='stretch', config=PLOTLY_CONFIG)
+            render_chart(fig_status, key="chart_payment_status")
         
         st.markdown("---")
         
@@ -272,6 +282,7 @@ def _render_summary_view(
             'payment_rate', 'fully_paid_count', 'unpaid_count'
         ]
         
+        # Fixed: Use width='stretch' instead of use_container_width=True
         st.dataframe(
             display_df[display_cols],
             width='stretch',
@@ -342,6 +353,7 @@ def _render_summary_view(
             'outstanding_amount', 'payment_status', 'aging_status'
         ]
         
+        # Fixed: Use width='stretch' instead of use_container_width=True
         st.dataframe(
             vendor_detail[display_cols],
             width='stretch',
@@ -408,7 +420,7 @@ def _render_aging_view(detail_df: pd.DataFrame, vendor_display: str) -> None:
             }
         )
         fig_aging.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_aging, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_aging, key="chart_aging_bar")
     
     with col2:
         # Aging pie chart
@@ -421,7 +433,7 @@ def _render_aging_view(detail_df: pd.DataFrame, vendor_display: str) -> None:
             title="Outstanding Amount Distribution",
             height=400
         )
-        st.plotly_chart(fig_pie, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_pie, key="chart_aging_pie")
     
     st.markdown("---")
     
@@ -431,9 +443,10 @@ def _render_aging_view(detail_df: pd.DataFrame, vendor_display: str) -> None:
     display_summary = aging_summary.copy()
     display_summary['Outstanding Amount'] = display_summary['Outstanding Amount'].apply(format_currency)
     
+    # Fixed: Use width='stretch' instead of use_container_width=True
     st.dataframe(
         display_summary,
-        use_container_width=True,
+        width='stretch',
         hide_index=True
     )
 
@@ -470,7 +483,7 @@ def _render_payment_status_view(
             title="Invoice Count by Status",
             height=400
         )
-        st.plotly_chart(fig_count, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_count, key="chart_status_count")
     
     with col2:
         # Status amount
@@ -487,7 +500,7 @@ def _render_payment_status_view(
             }
         )
         fig_amount.update_layout(height=400, showlegend=False)
-        st.plotly_chart(fig_amount, width='stretch', config=PLOTLY_CONFIG)
+        render_chart(fig_amount, key="chart_status_amount")
     
     st.markdown("---")
     
@@ -532,4 +545,4 @@ def _render_payment_status_view(
         hovermode='x unified'
     )
     
-    st.plotly_chart(fig_timeline, width='stretch', config=PLOTLY_CONFIG)
+    render_chart(fig_timeline, key="chart_payment_timeline")

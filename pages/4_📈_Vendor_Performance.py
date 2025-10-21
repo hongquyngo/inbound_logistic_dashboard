@@ -1,10 +1,13 @@
 """
-Vendor Performance Analysis Page - Three-Tab Structure
+Vendor Performance Analysis Page - Clean Version
 
 Tabs:
 1. Order Analysis - Track PO lifecycle (po_date based)
 2. Invoice Analysis - Analyze invoices and payments (inv_date based)  
 3. Product Mix - Product-level analysis
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import streamlit as st
@@ -30,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Page config
 st.set_page_config(
     page_title="Vendor Performance Analysis",
-    page_icon="🏭",
+    page_icon="📈",
     layout="wide"
 )
 
@@ -49,7 +52,7 @@ except Exception as e:
     st.stop()
 
 # Header
-st.title("🏭 Vendor Performance Analysis")
+st.title("📈 Vendor Performance Analysis")
 st.markdown("Multi-dimensional analytics: Orders, Invoices, and Products")
 
 # ==================== GLOBAL FILTERS SECTION ====================
@@ -207,10 +210,7 @@ with col1:
 with col2:
     if st.button("🔄 Refresh Data"):
         # Clear all caches
-        try:
-            st.cache_data.clear()
-        except:
-            pass
+        st.cache_data.clear()
         st.rerun()
 
 with col3:

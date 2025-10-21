@@ -1,7 +1,11 @@
 """
-Product Mix Analysis Tab - Refactored
+Product Mix Analysis Tab - Clean Version
 
 Analyze product performance with flexible date dimensions
+All deprecations fixed
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import streamlit as st
@@ -9,8 +13,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Dict, Any
 
-from ..visualizations import ChartFactory
-from ..constants import format_currency, format_percentage, PLOTLY_CONFIG
+from ..visualizations import ChartFactory, render_chart
+from ..constants import format_currency, format_percentage
 
 if TYPE_CHECKING:
     from ..data_access import VendorPerformanceDAO
@@ -185,7 +189,7 @@ def render(
         product_df,
         top_n=top_n
     )
-    st.plotly_chart(fig_treemap, width='stretch', config=PLOTLY_CONFIG)
+    render_chart(fig_treemap, key="chart_product_treemap")
     
     st.markdown("---")
     
@@ -254,12 +258,7 @@ def render(
     display_df['Conv %'] = display_df['conversion_rate'].apply(lambda x: f"{x:.1f}%")
     display_df['Avg Order'] = display_df['avg_order_value'].apply(format_currency)
     
-    display_columns = [
-        'product_name', 'pt_code', 'brand', 'po_count',
-        'Order Value', 'Invoiced', 'Outstanding', 'Conv %', 'Avg Order'
-    ]
-    
-    # Rename for display
+    # Prepare display columns
     display_df = display_df[['product_name', 'pt_code', 'brand', 'po_count',
                              'Order Value', 'Invoiced', 'Outstanding', 'Conv %', 'Avg Order']]
     display_df.columns = [
@@ -267,6 +266,7 @@ def render(
         'Order Value', 'Invoiced', 'Outstanding', 'Conv %', 'Avg Order'
     ]
     
+    # Fixed: Use width='stretch' instead of use_container_width=True
     st.dataframe(
         display_df,
         width='stretch',

@@ -1,20 +1,55 @@
 """
-Visualization Factory for Vendor Performance - Updated
+Visualization Factory for Vendor Performance - Clean Version
 
 Standardized charts for order, invoice, and product analysis
+All deprecations fixed and dead code removed
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from typing import Optional, List
+from typing import Optional
 import logging
+import streamlit as st
 
-from .constants import COLORS, CHART_HEIGHTS, format_currency
+from .constants import COLORS, CHART_HEIGHTS, format_currency, PLOTLY_CONFIG
 
 logger = logging.getLogger(__name__)
 
+
+# ==================== CHART RENDERER ====================
+
+def render_chart(
+    fig: go.Figure,
+    use_container_width: bool = True,
+    key: Optional[str] = None
+) -> None:
+    """
+    Render Plotly chart with proper configuration (handles deprecations)
+    
+    Args:
+        fig: Plotly figure
+        use_container_width: Use container width
+        key: Streamlit key for the chart
+    """
+    # Apply config directly to figure instead of passing to st.plotly_chart
+    fig.update_layout(
+        modebar={'remove': ['lasso2d', 'select2d']}
+    )
+    
+    # Call st.plotly_chart with minimal parameters
+    st.plotly_chart(
+        fig,
+        width='stretch' if use_container_width else 'content',
+        key=key
+    )
+
+
+# ==================== CHART FACTORY ====================
 
 class ChartFactory:
     """Factory for creating standardized charts"""
@@ -308,67 +343,6 @@ class ChartFactory:
             margin=dict(l=20, r=20, t=40, b=20)
         )
         
-        return fig
-    
-    @staticmethod
-    def create_period_comparison_bars(
-        current_data: pd.DataFrame,
-        previous_data: pd.DataFrame
-    ) -> go.Figure:
-        """
-        Create grouped bar chart comparing current vs previous period
-        
-        Args:
-            current_data: Current period aggregated data
-            previous_data: Previous period aggregated data
-            
-        Returns:
-            Plotly figure
-        """
-        if current_data.empty:
-            return ChartFactory._create_empty_figure("No data for comparison")
-        
-        # Aggregate totals
-        current_total = current_data['Order Value'].sum()
-        current_invoiced = current_data['Invoiced Value'].sum()
-        
-        if not previous_data.empty:
-            previous_total = previous_data['Order Value'].sum()
-            previous_invoiced = previous_data['Invoiced Value'].sum()
-        else:
-            previous_total = 0
-            previous_invoiced = 0
-        
-        fig = go.Figure()
-        
-        categories = ['Order Entry', 'Invoiced Value']
-        
-        fig.add_trace(go.Bar(
-            name='Previous Period',
-            x=categories,
-            y=[previous_total, previous_invoiced],
-            marker_color=COLORS['secondary'],
-            text=[format_currency(previous_total), format_currency(previous_invoiced)],
-            textposition='outside'
-        ))
-        
-        fig.add_trace(go.Bar(
-            name='Current Period',
-            x=categories,
-            y=[current_total, current_invoiced],
-            marker_color=COLORS['primary'],
-            text=[format_currency(current_total), format_currency(current_invoiced)],
-            textposition='outside'
-        ))
-        
-        fig.update_layout(
-            title="Period-over-Period Comparison",
-            yaxis_title="Value (USD)",
-            barmode='group',
-            height=CHART_HEIGHTS['compact']
-        )
-        
-        ChartFactory._apply_standard_layout(fig)
         return fig
     
     @staticmethod

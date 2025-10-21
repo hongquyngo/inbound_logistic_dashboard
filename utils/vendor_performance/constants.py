@@ -1,7 +1,11 @@
 """
-Shared Constants for Vendor Performance Module
+Shared Constants for Vendor Performance Module - Clean Version
 
 Contains all configuration, thresholds, and display mappings.
+Removed unused functions
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 from typing import Dict, List
@@ -151,19 +155,7 @@ STATUS_COLORS = {
     'Paid': COLORS['success']
 }
 
-# ==================== CONVERSION RATE HELPERS ====================
-def get_conversion_tier(rate: float) -> str:
-    """Get conversion tier label based on rate"""
-    if rate >= CONVERSION_THRESHOLDS['excellent']:
-        return "⭐ Excellent"
-    elif rate >= CONVERSION_THRESHOLDS['good']:
-        return "✅ Good"
-    elif rate >= CONVERSION_THRESHOLDS['fair']:
-        return "⚠️ Fair"
-    else:
-        return "❌ Poor"
-
-
+# ==================== CONVERSION RATE COLOR HELPER ====================
 def get_conversion_color(rate: float) -> str:
     """Get color for conversion rate"""
     if rate >= CONVERSION_THRESHOLDS['excellent']:
@@ -253,28 +245,3 @@ def format_number(value: float, decimals: int = 0) -> str:
     if decimals == 0:
         return f"{value:,.0f}"
     return f"{value:,.{decimals}f}"
-
-
-def sanitize_string(text: str, max_length: int = 100) -> str:
-    """
-    Sanitize user input string
-    
-    Args:
-        text: Input text
-        max_length: Maximum allowed length
-        
-    Returns:
-        Sanitized string
-    """
-    if not text:
-        return ""
-    
-    # Limit length
-    text = str(text)[:max_length]
-    
-    # Remove potentially dangerous characters
-    # Allow alphanumeric, spaces, hyphens, underscores
-    import re
-    text = re.sub(r'[^\w\s\-]', '', text)
-    
-    return text.strip()

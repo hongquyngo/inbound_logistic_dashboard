@@ -1,7 +1,11 @@
 """
-Calculation Logic for Vendor Performance - Updated
+Calculation Logic for Vendor Performance - Clean Version
 
 Focused on key business metrics with proper validation
+Removed unused functions
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import pandas as pd
@@ -247,114 +251,3 @@ class PerformanceCalculator:
             'aging_status': aging_status,
             'is_overdue': days_overdue > 0 and payment_status != 'Fully Paid'
         }
-    
-    @staticmethod
-    def calculate_summary_stats(df: pd.DataFrame, value_columns: List[str]) -> Dict[str, float]:
-        """
-        Calculate summary statistics for given columns
-        
-        Args:
-            df: DataFrame
-            value_columns: List of column names
-            
-        Returns:
-            Dictionary with summary stats
-        """
-        stats = {}
-        
-        for col in value_columns:
-            if col in df.columns:
-                stats[f'{col}_total'] = df[col].sum()
-                stats[f'{col}_mean'] = df[col].mean()
-                stats[f'{col}_median'] = df[col].median()
-                stats[f'{col}_min'] = df[col].min()
-                stats[f'{col}_max'] = df[col].max()
-        
-        return stats
-    
-    @staticmethod
-    def calculate_growth_metrics(
-        current_value: float,
-        previous_value: float
-    ) -> Dict[str, Any]:
-        """
-        Calculate period-over-period growth
-        
-        Args:
-            current_value: Current period value
-            previous_value: Previous period value
-            
-        Returns:
-            Dictionary with growth metrics
-        """
-        if previous_value == 0 or pd.isna(previous_value):
-            growth_rate = 0 if current_value == 0 else 100
-        else:
-            growth_rate = ((current_value - previous_value) / previous_value * 100)
-        
-        return {
-            'current': round(current_value, 2),
-            'previous': round(previous_value, 2),
-            'growth_rate': round(growth_rate, 1),
-            'growth_amount': round(current_value - previous_value, 2),
-            'is_growth': current_value > previous_value
-        }
-    
-    @staticmethod
-    def identify_performance_issues(
-        conversion_rate: float,
-        payment_rate: float,
-        days_overdue: int,
-        outstanding_amount: float
-    ) -> List[Dict[str, Any]]:
-        """
-        Identify performance issues
-        
-        Args:
-            conversion_rate: Order to invoice conversion rate
-            payment_rate: Payment completion rate
-            days_overdue: Days overdue
-            outstanding_amount: Outstanding amount
-            
-        Returns:
-            List of issue dictionaries
-        """
-        issues = []
-        
-        # Low conversion
-        if conversion_rate < 80:
-            issues.append({
-                'type': 'low_conversion',
-                'severity': 'warning' if conversion_rate >= 70 else 'critical',
-                'message': f'Low conversion rate: {conversion_rate:.1f}%',
-                'value': conversion_rate
-            })
-        
-        # Low payment rate
-        if payment_rate < 80:
-            issues.append({
-                'type': 'low_payment',
-                'severity': 'warning' if payment_rate >= 70 else 'critical',
-                'message': f'Low payment rate: {payment_rate:.1f}%',
-                'value': payment_rate
-            })
-        
-        # Overdue invoices
-        if days_overdue > 30:
-            issues.append({
-                'type': 'overdue',
-                'severity': 'warning' if days_overdue <= 60 else 'critical',
-                'message': f'Invoice overdue by {days_overdue} days',
-                'value': days_overdue
-            })
-        
-        # High outstanding
-        if outstanding_amount > 100000:
-            issues.append({
-                'type': 'high_outstanding',
-                'severity': 'warning',
-                'message': f'High outstanding amount: ${outstanding_amount:,.0f}',
-                'value': outstanding_amount
-            })
-        
-        return issues

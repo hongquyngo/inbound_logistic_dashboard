@@ -1,10 +1,15 @@
 """
-Data Access Layer for Vendor Performance - Refactored with Multi-Date Logic
+Data Access Layer for Vendor Performance - Clean Version
 
 Supports three date dimensions:
 1. Order Analysis: po_date based
 2. Invoice Analysis: inv_date based  
-3. Backlog Analysis: ETD based
+3. Product Analysis: Multiple date options
+
+Removed unused health_check method
+
+Version: 2.1
+Last Updated: 2025-10-21
 """
 
 import pandas as pd
@@ -13,6 +18,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from typing import Optional, Dict, List, Any, Tuple
 import streamlit as st
+from functools import wraps
+import time
 
 from ..db import get_db_engine
 from .exceptions import DataAccessError, ValidationError
@@ -20,18 +27,181 @@ from .exceptions import DataAccessError, ValidationError
 logger = logging.getLogger(__name__)
 
 
+# ==================== DECORATORS ====================
+
+def validate_date_range(func):
+    """Validate date range inputs"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_date = kwargs.get('start_date')
+        end_date = kwargs.get('end_date')
+        
+        if start_date and end_date:
+            # Check date order
+            if start_date > end_date:
+                raise ValidationError(
+                    "Start date must be before end date",
+                    {'start_date': start_date, 'end_date': end_date}
+                )
+            
+            # Prevent excessive date ranges (max 3 years)
+            days_diff = (end_date - start_date).days
+            if days_diff > 365 * 3:
+                raise ValidationError(
+                    "Date range too large (maximum 3 years allowed)",
+                    {'days': days_diff, 'max_days': 365 * 3}
+                )
+            
+            # Warn if date range is very large (> 1 year)
+            if days_diff > 365:
+                logger.warning(f"Large date range requested: {days_diff} days")
+        
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def monitor_performance(func):
+    """Monitor function execution time"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        func_name = func.__name__
+        
+        try:
+            result = func(*args, **kwargs)
+            execution_time = time.time() - start_time
+            
+            logger.info(
+                f"{func_name} executed in {execution_time:.2f}s",
+                extra={'execution_time': execution_time, 'function': func_name}
+            )
+            
+            # Alert if slow query (> 5 seconds)
+            if execution_time > 5.0:
+                logger.warning(
+                    f"⚠️ Slow query detected: {func_name} took {execution_time:.2f}s"
+                )
+            
+            return result
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(
+                f"{func_name} failed after {execution_time:.2f}s: {str(e)}",
+                exc_info=True
+            )
+            raise
+    
+    return wrapper
+
+
+# ==================== MAIN DAO CLASS ====================
+
 class VendorPerformanceDAO:
-    """Data Access Object for Vendor Performance with multi-date support"""
+    """
+    Data Access Object for Vendor Performance Analytics
+    
+    Provides secure, validated database access with:
+    - SQL injection prevention
+    - Input validation
+    - Performance monitoring
+    - Query caching
+    """
+    
+    # Column name mapping for each view
+    VIEW_COLUMN_MAPPING = {
+        'purchase_order_full_view': 'vendor_name',
+        'purchase_invoice_full_view': 'vendor'
+    }
+    
+    # Allowed column names for filtering (whitelist)
+    ALLOWED_FILTER_COLUMNS = {
+        'vendor_name', 'vendor', 'vendor_type', 
+        'vendor_location_type', 'payment_term',
+        'legal_entity_id'
+    }
     
     def __init__(self):
         """Initialize DAO with database engine"""
         try:
             self.engine = get_db_engine()
+            logger.info("VendorPerformanceDAO initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize database engine: {e}")
-            raise DataAccessError("Database connection failed", {'error': str(e)})
+            raise DataAccessError(
+                "Database connection failed", 
+                {'error': str(e)}
+            )
     
     # ==================== UTILITY METHODS ====================
+    
+    @staticmethod
+    def _get_vendor_column_for_view(view_name: str) -> str:
+        """
+        Get correct vendor column name for a database view
+        
+        Args:
+            view_name: Name of the database view
+            
+        Returns:
+            Correct vendor column name
+            
+        Raises:
+            ValidationError: If view name is unknown
+        """
+        if view_name not in VendorPerformanceDAO.VIEW_COLUMN_MAPPING:
+            raise ValidationError(
+                f"Unknown database view: {view_name}",
+                {
+                    'requested_view': view_name,
+                    'valid_views': list(VendorPerformanceDAO.VIEW_COLUMN_MAPPING.keys())
+                }
+            )
+        return VendorPerformanceDAO.VIEW_COLUMN_MAPPING[view_name]
+    
+    @staticmethod
+    def _validate_column_name(column_name: str) -> None:
+        """
+        Validate column name against whitelist
+        
+        Args:
+            column_name: Column name to validate
+            
+        Raises:
+            ValidationError: If column name is not in whitelist
+        """
+        if column_name not in VendorPerformanceDAO.ALLOWED_FILTER_COLUMNS:
+            raise ValidationError(
+                f"Invalid column name: {column_name}",
+                {
+                    'requested_column': column_name,
+                    'allowed_columns': list(VendorPerformanceDAO.ALLOWED_FILTER_COLUMNS)
+                }
+            )
+    
+    @staticmethod
+    def _sanitize_string_input(value: str, max_length: int = 200) -> str:
+        """
+        Sanitize string input to prevent injection
+        
+        Args:
+            value: Input string
+            max_length: Maximum allowed length
+            
+        Returns:
+            Sanitized string
+        """
+        if not value:
+            return ""
+        
+        # Convert to string and limit length
+        sanitized = str(value)[:max_length]
+        
+        # Remove potentially dangerous characters (allow alphanumeric, spaces, hyphens, underscores)
+        import re
+        sanitized = re.sub(r'[^\w\s\-\.]', '', sanitized)
+        
+        return sanitized.strip()
     
     @staticmethod
     def _build_date_filter(
@@ -40,16 +210,24 @@ class VendorPerformanceDAO:
         end_date: datetime
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Build date range filter clause
+        Build date range filter clause with validation
         
         Args:
-            date_field: Name of date column
+            date_field: Name of date column (validated)
             start_date: Start date
             end_date: End date
             
         Returns:
             Tuple of (SQL clause, parameters dict)
         """
+        # Validate date field name
+        allowed_date_fields = {'po_date', 'inv_date', 'etd', 'eta', 'arrival_date', 'due_date'}
+        if date_field not in allowed_date_fields:
+            raise ValidationError(
+                f"Invalid date field: {date_field}",
+                {'allowed_fields': list(allowed_date_fields)}
+            )
+        
         clause = f"{date_field} BETWEEN :start_date AND :end_date"
         params = {
             'start_date': start_date.strftime('%Y-%m-%d'),
@@ -63,58 +241,92 @@ class VendorPerformanceDAO:
         vendor_column: str = 'vendor_name'
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Build WHERE clause from filters
+        Build WHERE clause from filters with SQL injection prevention
         
         Args:
             filters: Filter dictionary
-            vendor_column: Name of vendor column in the view ('vendor_name' or 'vendor')
+            vendor_column: Name of vendor column in the view
             
         Returns:
             Tuple of (SQL clause, parameters dict)
+            
+        Raises:
+            ValidationError: If invalid column name provided
         """
+        # Validate vendor column name
+        VendorPerformanceDAO._validate_column_name(vendor_column)
+        
         clauses = []
         params = {}
         
+        # Vendor name filter
         if filters.get('vendor_name'):
+            # Sanitize input
+            vendor_name = VendorPerformanceDAO._sanitize_string_input(
+                filters['vendor_name']
+            )
             clauses.append(f"{vendor_column} = :vendor_name")
-            params['vendor_name'] = filters['vendor_name']
+            params['vendor_name'] = vendor_name
         
+        # Entity ID filter (numeric, safer)
         if filters.get('entity_id'):
-            clauses.append("legal_entity_id = :entity_id")
-            params['entity_id'] = filters['entity_id']
+            try:
+                entity_id = int(filters['entity_id'])
+                clauses.append("legal_entity_id = :entity_id")
+                params['entity_id'] = entity_id
+            except (ValueError, TypeError):
+                logger.warning(f"Invalid entity_id: {filters.get('entity_id')}")
         
+        # Vendor types filter (list)
         if filters.get('vendor_types'):
-            type_clauses = []
+            placeholders = []
             for i, vtype in enumerate(filters['vendor_types']):
                 param_name = f'vtype_{i}'
-                type_clauses.append(f":{param_name}")
-                params[param_name] = vtype
-            clauses.append(f"vendor_type IN ({','.join(type_clauses)})")
+                placeholders.append(f":{param_name}")
+                # Sanitize each value
+                params[param_name] = VendorPerformanceDAO._sanitize_string_input(vtype)
+            
+            if placeholders:
+                clauses.append(f"vendor_type IN ({','.join(placeholders)})")
         
+        # Vendor locations filter (list)
         if filters.get('vendor_locations'):
-            loc_clauses = []
+            placeholders = []
             for i, vloc in enumerate(filters['vendor_locations']):
                 param_name = f'vloc_{i}'
-                loc_clauses.append(f":{param_name}")
-                params[param_name] = vloc
-            clauses.append(f"vendor_location_type IN ({','.join(loc_clauses)})")
+                placeholders.append(f":{param_name}")
+                params[param_name] = VendorPerformanceDAO._sanitize_string_input(vloc)
+            
+            if placeholders:
+                clauses.append(f"vendor_location_type IN ({','.join(placeholders)})")
         
+        # Payment terms filter (list)
         if filters.get('payment_terms'):
-            term_clauses = []
+            placeholders = []
             for i, pterm in enumerate(filters['payment_terms']):
                 param_name = f'pterm_{i}'
-                term_clauses.append(f":{param_name}")
-                params[param_name] = pterm
-            clauses.append(f"payment_term IN ({','.join(term_clauses)})")
+                placeholders.append(f":{param_name}")
+                params[param_name] = VendorPerformanceDAO._sanitize_string_input(pterm)
+            
+            if placeholders:
+                clauses.append(f"payment_term IN ({','.join(placeholders)})")
         
         where_clause = " AND ".join(clauses) if clauses else "1=1"
         return where_clause, params
     
     # ==================== REFERENCE DATA ====================
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=3600)  # Cache for 1 hour (reference data changes rarely)
     def get_vendor_list(_self) -> List[str]:
-        """Get list of vendors in format 'CODE - NAME'"""
+        """
+        Get list of vendors in format 'CODE - NAME'
+        
+        Returns:
+            List of vendor display strings
+            
+        Raises:
+            DataAccessError: If query fails
+        """
         try:
             query = text("""
                 SELECT DISTINCT 
@@ -122,6 +334,8 @@ class VendorPerformanceDAO:
                 FROM purchase_order_full_view
                 WHERE vendor_name IS NOT NULL 
                     AND vendor_code IS NOT NULL
+                    AND vendor_name != ''
+                    AND vendor_code != ''
                 ORDER BY vendor_name
             """)
             
@@ -129,16 +343,24 @@ class VendorPerformanceDAO:
                 result = conn.execute(query)
                 vendors = [row[0] for row in result]
             
-            logger.info(f"Retrieved {len(vendors)} vendors")
+            logger.info(f"Retrieved {len(vendors)} vendors from database")
             return vendors
             
         except Exception as e:
             logger.error(f"Error getting vendor list: {e}", exc_info=True)
-            raise DataAccessError("Failed to load vendor list", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load vendor list", 
+                {'error': str(e)}
+            )
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
     def get_entity_list(_self) -> List[str]:
-        """Get list of legal entities"""
+        """
+        Get list of legal entities in format 'CODE - NAME'
+        
+        Returns:
+            List of entity display strings
+        """
         try:
             query = text("""
                 SELECT DISTINCT 
@@ -146,6 +368,8 @@ class VendorPerformanceDAO:
                 FROM purchase_order_full_view
                 WHERE legal_entity IS NOT NULL 
                     AND legal_entity_code IS NOT NULL
+                    AND legal_entity != ''
+                    AND legal_entity_code != ''
                 ORDER BY legal_entity
             """)
             
@@ -153,18 +377,31 @@ class VendorPerformanceDAO:
                 result = conn.execute(query)
                 entities = [row[0] for row in result]
             
-            logger.info(f"Retrieved {len(entities)} entities")
+            logger.info(f"Retrieved {len(entities)} legal entities")
             return entities
             
         except Exception as e:
             logger.error(f"Error getting entity list: {e}", exc_info=True)
-            return []
+            return []  # Return empty list instead of raising
     
     def get_entity_id_by_display(self, display_string: str) -> Optional[int]:
-        """Extract entity ID from display string"""
+        """
+        Extract entity ID from display string
+        
+        Args:
+            display_string: Entity display string (format: 'CODE - NAME')
+            
+        Returns:
+            Entity ID or None if not found
+        """
         try:
-            # Assume format "CODE - NAME"
+            # Parse display string
+            if ' - ' not in display_string:
+                logger.warning(f"Invalid entity display format: {display_string}")
+                return None
+            
             code = display_string.split(' - ')[0].strip()
+            code = self._sanitize_string_input(code, max_length=50)
             
             query = text("""
                 SELECT DISTINCT legal_entity_id
@@ -182,36 +419,46 @@ class VendorPerformanceDAO:
             logger.error(f"Error getting entity ID: {e}")
             return None
     
-    def get_filter_options(self) -> Dict[str, List[str]]:
-        """Get available filter options"""
+    @st.cache_data(ttl=3600)
+    def get_filter_options(_self) -> Dict[str, List[str]]:
+        """
+        Get available filter options for dropdowns
+        
+        Returns:
+            Dictionary with filter options
+        """
         try:
             queries = {
                 'vendor_types': """
                     SELECT DISTINCT vendor_type 
                     FROM purchase_order_full_view 
                     WHERE vendor_type IS NOT NULL 
+                        AND vendor_type != ''
                     ORDER BY vendor_type
                 """,
                 'vendor_locations': """
                     SELECT DISTINCT vendor_location_type 
                     FROM purchase_order_full_view 
-                    WHERE vendor_location_type IS NOT NULL 
+                    WHERE vendor_location_type IS NOT NULL
+                        AND vendor_location_type != ''
                     ORDER BY vendor_location_type
                 """,
                 'payment_terms': """
                     SELECT DISTINCT payment_term 
                     FROM purchase_order_full_view 
-                    WHERE payment_term IS NOT NULL 
+                    WHERE payment_term IS NOT NULL
+                        AND payment_term != ''
                     ORDER BY payment_term
                 """
             }
             
             options = {}
-            with self.engine.connect() as conn:
+            with _self.engine.connect() as conn:
                 for key, query in queries.items():
                     try:
                         result = conn.execute(text(query))
                         options[key] = [row[0] for row in result]
+                        logger.debug(f"Loaded {len(options[key])} options for {key}")
                     except Exception as e:
                         logger.warning(f"Could not get {key} options: {e}")
                         options[key] = []
@@ -220,11 +467,17 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting filter options: {e}")
-            return {}
+            return {
+                'vendor_types': [],
+                'vendor_locations': [],
+                'payment_terms': []
+            }
     
     # ==================== ORDER ANALYSIS QUERIES ====================
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    @validate_date_range
+    @monitor_performance
     def get_order_cohort_summary(
         _self,
         start_date: datetime,
@@ -237,18 +490,25 @@ class VendorPerformanceDAO:
         Tracks POs by po_date and shows ALL invoices for those POs
         
         Args:
-            start_date: Start of period
-            end_date: End of period
-            filters: Additional filters
+            start_date: Start of period (inclusive)
+            end_date: End of period (inclusive)
+            filters: Optional filter dictionary
             
         Returns:
             DataFrame with vendor-level summary
+            
+        Raises:
+            DataAccessError: If database query fails
+            ValidationError: If inputs are invalid
         """
         try:
+            # Get correct vendor column for this view
+            vendor_column = _self._get_vendor_column_for_view('purchase_order_full_view')
+            
             # Build filter clauses
             filter_clause, filter_params = _self._build_filter_clause(
                 filters or {},
-                vendor_column='vendor_name'  # purchase_order_full_view uses 'vendor_name'
+                vendor_column=vendor_column
             )
             
             query = f"""
@@ -339,6 +599,7 @@ class VendorPerformanceDAO:
             with _self.engine.connect() as conn:
                 df = pd.read_sql(text(query), conn, params=params)
             
+            # Fill NaN values
             df['conversion_rate'] = df['conversion_rate'].fillna(0)
             
             logger.info(f"Retrieved order cohort summary: {len(df)} vendors")
@@ -346,9 +607,14 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting order cohort summary: {e}", exc_info=True)
-            raise DataAccessError("Failed to load order summary", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load order summary", 
+                {'error': str(e)}
+            )
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    @validate_date_range
+    @monitor_performance
     def get_order_cohort_detail(
         _self,
         start_date: datetime,
@@ -359,11 +625,22 @@ class VendorPerformanceDAO:
         Get detailed PO data for order cohort analysis
         
         Returns PO-level details with current invoice status
+        
+        Args:
+            start_date: Start of period
+            end_date: End of period
+            filters: Optional filters
+            
+        Returns:
+            DataFrame with PO line details
         """
         try:
+            # Get correct vendor column
+            vendor_column = _self._get_vendor_column_for_view('purchase_order_full_view')
+            
             filter_clause, filter_params = _self._build_filter_clause(
                 filters or {}, 
-                vendor_column='vendor'  # purchase_invoice_full_view uses 'vendor'
+                vendor_column=vendor_column
             )
             
             query = f"""
@@ -419,11 +696,16 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting order detail: {e}", exc_info=True)
-            raise DataAccessError("Failed to load order detail", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load order detail", 
+                {'error': str(e)}
+            )
     
     # ==================== INVOICE ANALYSIS QUERIES ====================
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    @validate_date_range
+    @monitor_performance
     def get_invoice_summary(
         _self,
         start_date: datetime,
@@ -436,15 +718,18 @@ class VendorPerformanceDAO:
         Args:
             start_date: Start of period
             end_date: End of period
-            filters: Additional filters
+            filters: Optional filters
             
         Returns:
             DataFrame with vendor-level invoice summary
         """
         try:
+            # Get correct vendor column for invoice view
+            vendor_column = _self._get_vendor_column_for_view('purchase_invoice_full_view')
+            
             filter_clause, filter_params = _self._build_filter_clause(
                 filters or {},
-                vendor_column='vendor_name'  # purchase_order_full_view uses 'vendor_name'
+                vendor_column=vendor_column
             )
             
             query = f"""
@@ -513,20 +798,38 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting invoice summary: {e}", exc_info=True)
-            raise DataAccessError("Failed to load invoice summary", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load invoice summary", 
+                {'error': str(e)}
+            )
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    @validate_date_range
+    @monitor_performance
     def get_invoice_detail(
         _self,
         start_date: datetime,
         end_date: datetime,
         filters: Optional[Dict[str, Any]] = None
     ) -> pd.DataFrame:
-        """Get detailed invoice data"""
+        """
+        Get detailed invoice data
+        
+        Args:
+            start_date: Start of period
+            end_date: End of period
+            filters: Optional filters
+            
+        Returns:
+            DataFrame with invoice line details
+        """
         try:
+            # Get correct vendor column for invoice view
+            vendor_column = _self._get_vendor_column_for_view('purchase_invoice_full_view')
+            
             filter_clause, filter_params = _self._build_filter_clause(
                 filters or {}, 
-                vendor_column='vendor'  # purchase_invoice_full_view uses 'vendor'
+                vendor_column=vendor_column
             )
             
             query = f"""
@@ -575,11 +878,16 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting invoice detail: {e}", exc_info=True)
-            raise DataAccessError("Failed to load invoice detail", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load invoice detail", 
+                {'error': str(e)}
+            )
     
     # ==================== PRODUCT ANALYSIS QUERIES ====================
     
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=300)  # Cache for 5 minutes
+    @validate_date_range
+    @monitor_performance
     def get_product_summary_by_orders(
         _self,
         start_date: datetime,
@@ -590,9 +898,23 @@ class VendorPerformanceDAO:
         Get product summary based on orders (po_date)
         
         Returns product-level metrics for POs in period
+        
+        Args:
+            start_date: Start of period
+            end_date: End of period
+            filters: Optional filters
+            
+        Returns:
+            DataFrame with product summary
         """
         try:
-            filter_clause, filter_params = _self._build_filter_clause(filters or {})
+            # Get correct vendor column for order view
+            vendor_column = _self._get_vendor_column_for_view('purchase_order_full_view')
+            
+            filter_clause, filter_params = _self._build_filter_clause(
+                filters or {},
+                vendor_column=vendor_column
+            )
             
             query = f"""
             WITH product_orders AS (
@@ -651,4 +973,7 @@ class VendorPerformanceDAO:
             
         except Exception as e:
             logger.error(f"Error getting product summary: {e}", exc_info=True)
-            raise DataAccessError("Failed to load product summary", {'error': str(e)})
+            raise DataAccessError(
+                "Failed to load product summary", 
+                {'error': str(e)}
+            )
