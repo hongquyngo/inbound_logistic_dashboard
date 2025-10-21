@@ -1,77 +1,112 @@
 """
-Simplified Calculation Logic for Vendor Performance
+Calculation Logic for Vendor Performance - Updated
 
-Focused on key business metrics:
-- Order Entry vs Invoiced
-- Conversion Rate
-- Pending Delivery
-- Trends
+Focused on key business metrics with proper validation
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import logging
 
 from .exceptions import CalculationError, ValidationError
-from .constants import format_currency, format_percentage, CONVERSION_THRESHOLDS
 
 logger = logging.getLogger(__name__)
 
 
 class PerformanceCalculator:
-    """Simplified calculator for vendor performance metrics"""
+    """Calculator for vendor performance metrics"""
     
     @staticmethod
     def calculate_conversion_rate(
         invoiced_value: float,
-        order_value: float
+        order_value: float,
+        max_rate: float = 110.0
     ) -> float:
         """
-        Calculate conversion rate (Invoiced / Order * 100)
+        Calculate conversion rate with validation
         
         Args:
-            invoiced_value: Total invoiced amount
-            order_value: Total order entry amount
+            invoiced_value: Total invoiced amount (must be >= 0)
+            order_value: Total order value (must be > 0)
+            max_rate: Maximum allowed rate (default 110%)
             
         Returns:
-            Conversion rate percentage
+            Conversion rate percentage (0-max_rate)
+            
+        Raises:
+            ValidationError: If inputs are invalid
         """
+        # Type validation
+        try:
+            invoiced_value = float(invoiced_value) if invoiced_value is not None else 0.0
+            order_value = float(order_value) if order_value is not None else 0.0
+        except (TypeError, ValueError) as e:
+            raise ValidationError(f"Invalid numeric values: {e}")
+        
+        # Business logic validation
+        if invoiced_value < 0:
+            logger.warning(f"Negative invoiced value: {invoiced_value}")
+            invoiced_value = 0
+        
+        if order_value < 0:
+            logger.warning(f"Negative order value: {order_value}")
+            order_value = 0
+        
+        # Calculate rate
         if pd.isna(order_value) or order_value == 0:
             return 0.0
         
         rate = (invoiced_value / order_value * 100)
+        
+        # Cap at maximum
+        rate = min(rate, max_rate)
+        
         return round(rate, 1)
     
     @staticmethod
-    def calculate_pending_delivery(
-        order_value: float,
-        invoiced_value: float
+    def calculate_payment_rate(
+        paid_value: float,
+        invoiced_value: float,
+        max_rate: float = 100.0
     ) -> float:
         """
-        Calculate pending delivery value
+        Calculate payment rate
         
         Args:
-            order_value: Total order value
-            invoiced_value: Total invoiced value
+            paid_value: Total paid amount
+            invoiced_value: Total invoiced amount
+            max_rate: Maximum allowed rate
             
         Returns:
-            Pending delivery amount
+            Payment rate percentage
         """
-        pending = order_value - invoiced_value
-        return max(0, round(pending, 2))
+        try:
+            paid_value = float(paid_value) if paid_value is not None else 0.0
+            invoiced_value = float(invoiced_value) if invoiced_value is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+        
+        if paid_value < 0 or invoiced_value < 0:
+            return 0.0
+        
+        if invoiced_value == 0:
+            return 0.0
+        
+        rate = (paid_value / invoiced_value * 100)
+        return round(min(rate, max_rate), 1)
     
     @staticmethod
     def aggregate_by_period(
-        po_df: pd.DataFrame,
+        df: pd.DataFrame,
         period_type: str = 'monthly',
         date_column: str = 'po_date'
     ) -> pd.DataFrame:
         """
-        Aggregate PO data by time period
+        Aggregate data by time period
         
         Args:
-            po_df: DataFrame with PO data
+            df: DataFrame with data
             period_type: 'monthly', 'quarterly', 'yearly'
             date_column: Date column name
             
@@ -81,17 +116,17 @@ class PerformanceCalculator:
         Raises:
             CalculationError: If aggregation fails
         """
-        if po_df.empty:
+        if df.empty:
             return pd.DataFrame()
         
         try:
-            df = po_df.copy()
+            work_df = df.copy()
             
-            # Ensure date column is datetime
-            if date_column not in df.columns:
-                raise ValidationError(f"Column {date_column} not found in DataFrame")
+            # Ensure date column exists and is datetime
+            if date_column not in work_df.columns:
+                raise ValidationError(f"Column {date_column} not found")
             
-            df[date_column] = pd.to_datetime(df[date_column])
+            work_df[date_column] = pd.to_datetime(work_df[date_column])
             
             # Create period column
             period_map = {
@@ -101,33 +136,63 @@ class PerformanceCalculator:
             }
             
             period_code = period_map.get(period_type.lower(), 'M')
-            df['period'] = df[date_column].dt.to_period(period_code).dt.start_time
+            work_df['period'] = work_df[date_column].dt.to_period(period_code).dt.start_time
             
-            # Aggregate
-            aggregated = df.groupby(['period', 'vendor_name']).agg({
-                'po_number': 'nunique',
-                'total_order_value_usd': 'sum',
-                'invoiced_amount_usd': 'sum',
-                'pending_delivery_usd': 'sum',
-                'po_line_id': 'count',
-                'product_name': 'nunique'
-            }).reset_index()
+            # Determine grouping columns
+            group_cols = ['period']
+            if 'vendor_name' in work_df.columns:
+                group_cols.append('vendor_name')
             
-            # Rename columns
-            aggregated.columns = [
-                'Period', 'Vendor', 'PO Count', 'Order Value', 
-                'Invoiced Value', 'Pending Delivery',
-                'Line Items', 'Products'
-            ]
+            # Aggregate with proper column selection
+            agg_dict = {}
             
-            # Calculate conversion rate
-            aggregated['Conversion Rate'] = aggregated.apply(
-                lambda row: PerformanceCalculator.calculate_conversion_rate(
-                    row['Invoiced Value'], 
-                    row['Order Value']
-                ),
-                axis=1
-            )
+            if 'po_number' in work_df.columns:
+                agg_dict['po_number'] = 'nunique'
+            
+            if 'total_order_value_usd' in work_df.columns:
+                agg_dict['total_order_value_usd'] = 'sum'
+            elif 'total_amount_usd' in work_df.columns:
+                agg_dict['total_amount_usd'] = 'sum'
+            
+            if 'invoiced_amount_usd' in work_df.columns:
+                agg_dict['invoiced_amount_usd'] = 'sum'
+            
+            if 'outstanding_invoiced_amount_usd' in work_df.columns:
+                agg_dict['outstanding_invoiced_amount_usd'] = 'sum'
+            
+            if 'po_line_id' in work_df.columns:
+                agg_dict['po_line_id'] = 'count'
+            
+            if 'product_name' in work_df.columns:
+                agg_dict['product_name'] = 'nunique'
+            
+            aggregated = work_df.groupby(group_cols).agg(agg_dict).reset_index()
+            
+            # Rename columns to standard names
+            column_rename = {
+                'po_number': 'PO Count',
+                'total_order_value_usd': 'Order Value',
+                'total_amount_usd': 'Order Value',
+                'invoiced_amount_usd': 'Invoiced Value',
+                'outstanding_invoiced_amount_usd': 'Pending Delivery',
+                'po_line_id': 'Line Items',
+                'product_name': 'Products',
+                'period': 'Period'
+            }
+            
+            # Only rename columns that exist
+            rename_dict = {k: v for k, v in column_rename.items() if k in aggregated.columns}
+            aggregated.rename(columns=rename_dict, inplace=True)
+            
+            # Calculate conversion rate if both columns exist
+            if 'Order Value' in aggregated.columns and 'Invoiced Value' in aggregated.columns:
+                aggregated['Conversion Rate'] = (
+                    aggregated['Invoiced Value'] / aggregated['Order Value'].replace(0, np.nan) * 100
+                ).fillna(0).round(1)
+            
+            # Add Vendor column if exists in grouping
+            if 'vendor_name' in aggregated.columns:
+                aggregated.rename(columns={'vendor_name': 'Vendor'}, inplace=True)
             
             logger.info(f"Aggregated {len(df)} records into {len(aggregated)} periods")
             return aggregated
@@ -137,12 +202,83 @@ class PerformanceCalculator:
             raise CalculationError("Failed to aggregate data by period", {'error': str(e)})
     
     @staticmethod
+    def calculate_aging_metrics(
+        invoice_date: pd.Timestamp,
+        due_date: pd.Timestamp,
+        payment_status: str,
+        current_date: Optional[pd.Timestamp] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculate invoice aging metrics
+        
+        Args:
+            invoice_date: Invoice issuance date
+            due_date: Payment due date
+            payment_status: Payment status
+            current_date: Current date (default: today)
+            
+        Returns:
+            Dictionary with aging metrics
+        """
+        if current_date is None:
+            current_date = pd.Timestamp.now()
+        
+        # Calculate days
+        invoice_age = (current_date - invoice_date).days if pd.notna(invoice_date) else 0
+        days_overdue = (current_date - due_date).days if pd.notna(due_date) else 0
+        
+        # Determine aging bucket
+        if payment_status == 'Fully Paid':
+            aging_status = 'Paid'
+        elif days_overdue < 0:
+            aging_status = 'Not Yet Due'
+        elif days_overdue <= 30:
+            aging_status = '0-30 Days'
+        elif days_overdue <= 60:
+            aging_status = '31-60 Days'
+        elif days_overdue <= 90:
+            aging_status = '61-90 Days'
+        else:
+            aging_status = '>90 Days'
+        
+        return {
+            'invoice_age_days': invoice_age,
+            'days_overdue': max(0, days_overdue),
+            'aging_status': aging_status,
+            'is_overdue': days_overdue > 0 and payment_status != 'Fully Paid'
+        }
+    
+    @staticmethod
+    def calculate_summary_stats(df: pd.DataFrame, value_columns: List[str]) -> Dict[str, float]:
+        """
+        Calculate summary statistics for given columns
+        
+        Args:
+            df: DataFrame
+            value_columns: List of column names
+            
+        Returns:
+            Dictionary with summary stats
+        """
+        stats = {}
+        
+        for col in value_columns:
+            if col in df.columns:
+                stats[f'{col}_total'] = df[col].sum()
+                stats[f'{col}_mean'] = df[col].mean()
+                stats[f'{col}_median'] = df[col].median()
+                stats[f'{col}_min'] = df[col].min()
+                stats[f'{col}_max'] = df[col].max()
+        
+        return stats
+    
+    @staticmethod
     def calculate_growth_metrics(
         current_value: float,
         previous_value: float
     ) -> Dict[str, Any]:
         """
-        Calculate growth metrics
+        Calculate period-over-period growth
         
         Args:
             current_value: Current period value
@@ -160,141 +296,65 @@ class PerformanceCalculator:
             'current': round(current_value, 2),
             'previous': round(previous_value, 2),
             'growth_rate': round(growth_rate, 1),
-            'growth_amount': round(current_value - previous_value, 2)
+            'growth_amount': round(current_value - previous_value, 2),
+            'is_growth': current_value > previous_value
         }
     
     @staticmethod
-    def calculate_vendor_comparison(
-        vendor_df: pd.DataFrame,
-        all_vendors_df: pd.DataFrame
-    ) -> Dict[str, Any]:
+    def identify_performance_issues(
+        conversion_rate: float,
+        payment_rate: float,
+        days_overdue: int,
+        outstanding_amount: float
+    ) -> List[Dict[str, Any]]:
         """
-        Calculate vendor comparison vs overall average
+        Identify performance issues
         
         Args:
-            vendor_df: Single vendor data
-            all_vendors_df: All vendors data
+            conversion_rate: Order to invoice conversion rate
+            payment_rate: Payment completion rate
+            days_overdue: Days overdue
+            outstanding_amount: Outstanding amount
             
         Returns:
-            Comparison metrics
+            List of issue dictionaries
         """
-        if vendor_df.empty or all_vendors_df.empty:
-            return {}
+        issues = []
         
-        vendor_metrics = {
-            'order_value': vendor_df['total_order_value'].sum(),
-            'invoiced_value': vendor_df['total_invoiced_value'].sum(),
-            'conversion_rate': PerformanceCalculator.calculate_conversion_rate(
-                vendor_df['total_invoiced_value'].sum(),
-                vendor_df['total_order_value'].sum()
-            ),
-            'po_count': vendor_df['total_pos'].sum()
-        }
-        
-        avg_metrics = {
-            'avg_order_value': all_vendors_df['total_order_value'].mean(),
-            'avg_conversion_rate': all_vendors_df['conversion_rate'].mean(),
-            'avg_po_count': all_vendors_df['total_pos'].mean()
-        }
-        
-        return {
-            'vendor': vendor_metrics,
-            'average': avg_metrics,
-            'vs_average': {
-                'conversion_diff': round(
-                    vendor_metrics['conversion_rate'] - avg_metrics['avg_conversion_rate'], 
-                    1
-                ),
-                'value_diff_pct': round(
-                    (vendor_metrics['order_value'] / avg_metrics['avg_order_value'] - 1) * 100,
-                    1
-                ) if avg_metrics['avg_order_value'] > 0 else 0
-            }
-        }
-    
-    @staticmethod
-    def identify_alerts(vendor_summary: pd.Series) -> List[Dict[str, Any]]:
-        """
-        Identify performance alerts
-        
-        Args:
-            vendor_summary: Vendor summary data
-            
-        Returns:
-            List of alerts
-        """
-        alerts = []
-        
-        # Low conversion rate
-        conversion_rate = vendor_summary.get('conversion_rate', 0)
-        if conversion_rate < CONVERSION_THRESHOLDS['fair']:
-            alerts.append({
+        # Low conversion
+        if conversion_rate < 80:
+            issues.append({
                 'type': 'low_conversion',
-                'severity': 'warning',
-                'message': f'Conversion rate {conversion_rate:.1f}% below target ({CONVERSION_THRESHOLDS["fair"]}%)',
+                'severity': 'warning' if conversion_rate >= 70 else 'critical',
+                'message': f'Low conversion rate: {conversion_rate:.1f}%',
                 'value': conversion_rate
             })
         
-        # High pending delivery
-        pending = vendor_summary.get('pending_delivery_value', 0)
-        if pending > 100000:  # > $100K
-            alerts.append({
-                'type': 'high_pending',
-                'severity': 'warning',
-                'message': f'High pending delivery: {format_currency(pending)}',
-                'value': pending
+        # Low payment rate
+        if payment_rate < 80:
+            issues.append({
+                'type': 'low_payment',
+                'severity': 'warning' if payment_rate >= 70 else 'critical',
+                'message': f'Low payment rate: {payment_rate:.1f}%',
+                'value': payment_rate
             })
         
-        # No recent orders (if last_po_date available)
-        if 'last_po_date' in vendor_summary:
-            last_po = pd.to_datetime(vendor_summary['last_po_date'])
-            days_since = (pd.Timestamp.now() - last_po).days
-            if days_since > 90:
-                alerts.append({
-                    'type': 'inactive',
-                    'severity': 'info',
-                    'message': f'No orders in last {days_since} days',
-                    'value': days_since
-                })
+        # Overdue invoices
+        if days_overdue > 30:
+            issues.append({
+                'type': 'overdue',
+                'severity': 'warning' if days_overdue <= 60 else 'critical',
+                'message': f'Invoice overdue by {days_overdue} days',
+                'value': days_overdue
+            })
         
-        return alerts
-    
-    @staticmethod
-    def calculate_cumulative(df: pd.DataFrame, value_column: str) -> pd.DataFrame:
-        """
-        Calculate cumulative sum for time series
+        # High outstanding
+        if outstanding_amount > 100000:
+            issues.append({
+                'type': 'high_outstanding',
+                'severity': 'warning',
+                'message': f'High outstanding amount: ${outstanding_amount:,.0f}',
+                'value': outstanding_amount
+            })
         
-        Args:
-            df: DataFrame with period data
-            value_column: Column to accumulate
-            
-        Returns:
-            DataFrame with cumulative column added
-        """
-        if df.empty or value_column not in df.columns:
-            return df
-        
-        df = df.sort_values('Period')
-        df[f'{value_column}_cumulative'] = df[value_column].cumsum()
-        
-        return df
-    
-    @staticmethod
-    def format_summary_stats(vendor_summary: pd.Series) -> Dict[str, str]:
-        """
-        Format summary statistics for display
-        
-        Args:
-            vendor_summary: Vendor summary data
-            
-        Returns:
-            Formatted statistics
-        """
-        return {
-            'Total Order Value': format_currency(vendor_summary.get('total_order_value', 0)),
-            'Invoiced Value': format_currency(vendor_summary.get('total_invoiced_value', 0)),
-            'Pending Delivery': format_currency(vendor_summary.get('pending_delivery_value', 0)),
-            'Conversion Rate': format_percentage(vendor_summary.get('conversion_rate', 0)),
-            'Total POs': f"{vendor_summary.get('total_pos', 0):,}",
-            'Avg PO Value': format_currency(vendor_summary.get('avg_po_value', 0))
-        }
+        return issues

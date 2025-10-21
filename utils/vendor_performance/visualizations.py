@@ -1,10 +1,7 @@
 """
-Visualization Factory for Vendor Performance - Refactored
+Visualization Factory for Vendor Performance - Updated
 
-Simplified charts focused on key metrics:
-- Order Entry vs Invoiced trends
-- Conversion rates
-- Product mix
+Standardized charts for order, invoice, and product analysis
 """
 
 import pandas as pd
@@ -53,7 +50,7 @@ class ChartFactory:
             fig.add_trace(go.Scatter(
                 x=df['Period'],
                 y=df['Cumulative Order'],
-                mode='lines',
+                mode='lines+markers',
                 name='Cumulative Order Entry',
                 line=dict(color=COLORS['primary'], width=3),
                 fill='tozeroy',
@@ -63,7 +60,7 @@ class ChartFactory:
             fig.add_trace(go.Scatter(
                 x=df['Period'],
                 y=df['Cumulative Invoiced'],
-                mode='lines',
+                mode='lines+markers',
                 name='Cumulative Invoiced',
                 line=dict(color=COLORS['success'], width=3),
                 fill='tozeroy',
@@ -83,7 +80,8 @@ class ChartFactory:
                     y=df['Order Value'],
                     name='Order Entry',
                     marker_color=COLORS['primary'],
-                    opacity=0.7
+                    opacity=0.7,
+                    hovertemplate='<b>Order Entry</b><br>%{y:$,.0f}<extra></extra>'
                 ),
                 secondary_y=False
             )
@@ -95,31 +93,34 @@ class ChartFactory:
                     y=df['Invoiced Value'],
                     name='Invoiced Value',
                     marker_color=COLORS['success'],
-                    opacity=0.7
+                    opacity=0.7,
+                    hovertemplate='<b>Invoiced</b><br>%{y:$,.0f}<extra></extra>'
                 ),
                 secondary_y=False
             )
             
-            # Conversion Rate line
-            fig.add_trace(
-                go.Scatter(
-                    x=df['Period'],
-                    y=df['Conversion Rate'],
-                    name='Conversion Rate %',
-                    line=dict(color=COLORS['danger'], width=3, dash='dash'),
-                    yaxis='y2'
-                ),
-                secondary_y=True
-            )
-            
-            # Add target line for conversion rate
-            fig.add_hline(
-                y=90, 
-                line_dash="dot", 
-                line_color="gray",
-                annotation_text="Target: 90%",
-                secondary_y=True
-            )
+            # Conversion Rate line (if exists)
+            if 'Conversion Rate' in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df['Period'],
+                        y=df['Conversion Rate'],
+                        name='Conversion Rate %',
+                        line=dict(color=COLORS['danger'], width=3, dash='dash'),
+                        yaxis='y2',
+                        hovertemplate='<b>Conversion</b><br>%{y:.1f}%<extra></extra>'
+                    ),
+                    secondary_y=True
+                )
+                
+                # Add target line for conversion rate
+                fig.add_hline(
+                    y=90, 
+                    line_dash="dot", 
+                    line_color="gray",
+                    annotation_text="Target: 90%",
+                    secondary_y=True
+                )
             
             fig.update_yaxes(title_text="Value (USD)", secondary_y=False)
             fig.update_yaxes(title_text="Conversion Rate (%)", secondary_y=True, range=[0, 110])
@@ -223,28 +224,39 @@ class ChartFactory:
         top_vendors = vendor_summary.nlargest(top_n, metric).copy()
         top_vendors = top_vendors.sort_values(metric)  # Sort for horizontal bar
         
+        # Determine vendor name column
+        vendor_col = 'vendor_name' if 'vendor_name' in top_vendors.columns else 'vendor'
+        
+        # Color by conversion rate if available
+        if 'conversion_rate' in top_vendors.columns:
+            color_col = 'conversion_rate'
+            color_range = [0, 100]
+        else:
+            color_col = None
+            color_range = None
+        
         fig = go.Figure()
         
         fig.add_trace(go.Bar(
             x=top_vendors[metric],
-            y=top_vendors['vendor_name'],
+            y=top_vendors[vendor_col],
             orientation='h',
             marker=dict(
-                color=top_vendors['conversion_rate'],
-                colorscale='RdYlGn',
-                colorbar=dict(title="Conversion %"),
-                cmin=0,
-                cmax=100
+                color=top_vendors[color_col] if color_col else COLORS['primary'],
+                colorscale='RdYlGn' if color_col else None,
+                colorbar=dict(title="Conv %") if color_col else None,
+                cmin=color_range[0] if color_range else None,
+                cmax=color_range[1] if color_range else None
             ),
             text=top_vendors[metric].apply(lambda x: format_currency(x)),
             textposition='inside',
-            hovertemplate='<b>%{y}</b><br>Value: %{x:,.0f}<br>Conversion: %{marker.color:.1f}%<extra></extra>'
+            hovertemplate='<b>%{y}</b><br>Value: %{x:,.0f}<extra></extra>'
         ))
         
         metric_titles = {
             'total_order_value': 'Order Value',
             'total_invoiced_value': 'Invoiced Value',
-            'pending_delivery_value': 'Pending Delivery'
+            'outstanding_value': 'Outstanding'
         }
         
         fig.update_layout(

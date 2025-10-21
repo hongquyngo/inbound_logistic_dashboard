@@ -5,6 +5,7 @@ Contains all configuration, thresholds, and display mappings.
 """
 
 from typing import Dict, List
+import pandas as pd
 
 # ==================== PLOTLY CONFIGURATION ====================
 PLOTLY_CONFIG = {
@@ -46,61 +47,90 @@ PENDING_DAYS_THRESHOLDS = {
     'normal': 0          # <= 15 days
 }
 
+# ==================== DATE DIMENSION MAPPINGS ====================
+DATE_DIMENSIONS = {
+    'order': {
+        'field': 'po_date',
+        'label': 'Order Date (PO Date)',
+        'description': 'Based on purchase order creation date',
+        'view': 'purchase_order_full_view'
+    },
+    'invoice': {
+        'field': 'inv_date',
+        'label': 'Invoice Date',
+        'description': 'Based on invoice issuance date',
+        'view': 'purchase_invoice_full_view'
+    },
+    'delivery': {
+        'field': 'COALESCE(adjust_etd, etd)',
+        'label': 'Expected Delivery (ETD)',
+        'description': 'Based on expected delivery date',
+        'view': 'purchase_order_full_view'
+    }
+}
+
 # ==================== COLUMN DISPLAY NAMES ====================
 COLUMN_DISPLAY_NAMES = {
     # Vendor info
     'vendor_name': 'Vendor',
+    'vendor': 'Vendor',
     'vendor_code': 'Code',
     'vendor_type': 'Type',
     'vendor_location_type': 'Location',
+    'legal_entity': 'Legal Entity',
     
     # Order metrics
     'total_pos': 'Total POs',
-    'total_po_value': 'Total Order Value',
-    'total_invoiced': 'Invoiced Value',
-    'pending_delivery': 'Pending Delivery',
+    'total_order_value': 'Order Value',
+    'total_invoiced_value': 'Invoiced Value',
+    'outstanding_value': 'Outstanding',
     'conversion_rate': 'Conversion %',
+    
+    # Invoice metrics
+    'total_invoices': 'Invoices',
+    'total_paid': 'Paid',
+    'total_outstanding': 'Outstanding',
+    'payment_rate': 'Payment %',
+    'overdue_amount': 'Overdue',
     
     # Product info
     'product_name': 'Product',
     'brand': 'Brand',
     'pt_code': 'PT Code',
     
-    # Quantity
-    'standard_quantity': 'Order Qty',
-    'total_standard_arrived_quantity': 'Arrived Qty',
-    'total_buying_invoiced_quantity': 'Invoiced Qty',
-    
-    # Financial
-    'total_amount_usd': 'Order Value',
-    'invoiced_amount_usd': 'Invoiced Value',
-    'outstanding_invoiced_amount_usd': 'Outstanding',
-    'currency': 'Currency',
-    'payment_term': 'Payment Terms',
+    # Dates
+    'po_date': 'PO Date',
+    'inv_date': 'Invoice Date',
+    'due_date': 'Due Date',
+    'etd': 'ETD',
+    'eta': 'ETA',
     
     # Status
     'status': 'Status',
-    'invoice_completion_percent': 'Invoice %',
-    'arrival_completion_percent': 'Arrival %',
-    
-    # Dates
-    'po_date': 'PO Date',
-    'etd': 'ETD',
-    'eta': 'ETA',
-    'last_invoice_date': 'Last Invoice'
+    'payment_status': 'Payment Status',
+    'aging_status': 'Aging Status'
 }
 
 # ==================== STATUS DISPLAY ====================
 STATUS_LABELS = {
+    # Order statuses
     'COMPLETED': '✅ Completed',
     'IN_PROCESS': '🔄 In Process',
     'PENDING': '⏳ Pending',
     'PENDING_INVOICING': '📋 Pending Invoice',
     'PENDING_RECEIPT': '📦 Pending Receipt',
     'OVER_DELIVERED': '⚠️ Over Delivered',
-    'CANCELLED': '❌ Cancelled',
-    'PARTIALLY_CANCELLED_COMPLETED': '✅ Partially Cancelled (Completed)',
-    'PARTIALLY_CANCELLED_PROCESSING': '🔄 Partially Cancelled (Processing)'
+    'CANCELLED': '✖️ Cancelled',
+    
+    # Payment statuses
+    'Fully Paid': '✅ Fully Paid',
+    'Partially Paid': '⚠️ Partially Paid',
+    'Unpaid': '❌ Unpaid',
+    
+    # Aging statuses
+    'Current': '✅ Current',
+    'Overdue': '⚠️ Overdue',
+    'Paid': '✅ Paid'
 }
 
 STATUS_COLORS = {
@@ -111,11 +141,17 @@ STATUS_COLORS = {
     'PENDING_RECEIPT': COLORS['warning'],
     'OVER_DELIVERED': COLORS['danger'],
     'CANCELLED': COLORS['secondary'],
-    'PARTIALLY_CANCELLED_COMPLETED': COLORS['success'],
-    'PARTIALLY_CANCELLED_PROCESSING': COLORS['info']
+    
+    'Fully Paid': COLORS['success'],
+    'Partially Paid': COLORS['warning'],
+    'Unpaid': COLORS['danger'],
+    
+    'Current': COLORS['success'],
+    'Overdue': COLORS['danger'],
+    'Paid': COLORS['success']
 }
 
-# ==================== CONVERSION RATE LABELS ====================
+# ==================== CONVERSION RATE HELPERS ====================
 def get_conversion_tier(rate: float) -> str:
     """Get conversion tier label based on rate"""
     if rate >= CONVERSION_THRESHOLDS['excellent']:
@@ -126,6 +162,7 @@ def get_conversion_tier(rate: float) -> str:
         return "⚠️ Fair"
     else:
         return "❌ Poor"
+
 
 def get_conversion_color(rate: float) -> str:
     """Get color for conversion rate"""
@@ -143,7 +180,6 @@ DATE_RANGE_OPTIONS = {
     'Last 3 Months': 3,
     'Last 6 Months': 6,
     'Last 12 Months': 12,
-    'YTD': 'ytd',
     'Custom': 'custom'
 }
 
@@ -161,43 +197,18 @@ CHART_HEIGHTS = {
     'extra_large': 600
 }
 
-# ==================== EXPORT FORMATS ====================
-EXPORT_FORMATS = [
-    'Excel (Multi-sheet)',
-    'CSV (Data Only)',
-    'PDF (Report)'
-]
-
-EXPORT_SECTIONS = [
-    'Executive Summary',
-    'Financial Metrics',
-    'Purchase History',
-    'Product Analysis',
-    'Recommendations'
-]
-
-# ==================== ALERTS CONFIGURATION ====================
-ALERT_TYPES = {
-    'pending_long': {
-        'icon': '⚠️',
-        'color': COLORS['warning'],
-        'threshold': PENDING_DAYS_THRESHOLDS['critical']
-    },
-    'low_conversion': {
-        'icon': '📉',
-        'color': COLORS['danger'],
-        'threshold': CONVERSION_THRESHOLDS['fair']
-    },
-    'high_outstanding': {
-        'icon': '💰',
-        'color': COLORS['warning'],
-        'threshold': 100000  # $100K
-    }
-}
-
 # ==================== FORMATTER FUNCTIONS ====================
 def format_currency(value: float, compact: bool = False) -> str:
-    """Format currency value"""
+    """
+    Format currency value
+    
+    Args:
+        value: Numeric value
+        compact: Use compact notation (M/K)
+        
+    Returns:
+        Formatted currency string
+    """
     if pd.isna(value) or value is None:
         return "$0"
     
@@ -209,19 +220,61 @@ def format_currency(value: float, compact: bool = False) -> str:
     
     return f"${value:,.0f}"
 
+
 def format_percentage(value: float, decimals: int = 1) -> str:
-    """Format percentage value"""
+    """
+    Format percentage value
+    
+    Args:
+        value: Numeric value
+        decimals: Decimal places
+        
+    Returns:
+        Formatted percentage string
+    """
     if pd.isna(value) or value is None:
         return "0.0%"
     return f"{value:.{decimals}f}%"
 
+
 def format_number(value: float, decimals: int = 0) -> str:
-    """Format number with thousand separators"""
+    """
+    Format number with thousand separators
+    
+    Args:
+        value: Numeric value
+        decimals: Decimal places
+        
+    Returns:
+        Formatted number string
+    """
     if pd.isna(value) or value is None:
         return "0"
     if decimals == 0:
         return f"{value:,.0f}"
     return f"{value:,.{decimals}f}"
 
-# Import pandas for type checking
-import pandas as pd
+
+def sanitize_string(text: str, max_length: int = 100) -> str:
+    """
+    Sanitize user input string
+    
+    Args:
+        text: Input text
+        max_length: Maximum allowed length
+        
+    Returns:
+        Sanitized string
+    """
+    if not text:
+        return ""
+    
+    # Limit length
+    text = str(text)[:max_length]
+    
+    # Remove potentially dangerous characters
+    # Allow alphanumeric, spaces, hyphens, underscores
+    import re
+    text = re.sub(r'[^\w\s\-]', '', text)
+    
+    return text.strip()

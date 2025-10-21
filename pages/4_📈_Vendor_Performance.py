@@ -1,15 +1,9 @@
 """
-Vendor Performance Analysis Page - Refactored
+Vendor Performance Analysis Page - Three-Tab Structure
 
-Simplified dashboard focused on key business metrics:
-- Order Entry Value
-- Invoiced Value  
-- Pending Delivery
-- Conversion Rate
-
-3 Tabs:
-1. Overview - Snapshot dashboard
-2. Financial Performance - Order entry vs invoiced trends
+Tabs:
+1. Order Analysis - Track PO lifecycle (po_date based)
+2. Invoice Analysis - Analyze invoices and payments (inv_date based)  
 3. Product Mix - Product-level analysis
 """
 
@@ -17,17 +11,17 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import logging
+from typing import Optional
 
 # Explicit imports
 from utils.auth import AuthManager
 from utils.vendor_performance.data_access import VendorPerformanceDAO
-from utils.vendor_performance.calculations import PerformanceCalculator
-from utils.vendor_performance.exceptions import DataAccessError, VendorPerformanceError
+from utils.vendor_performance.exceptions import DataAccessError
 
 # Import tab modules
-from utils.vendor_performance.tabs import tab_overview
-from utils.vendor_performance.tabs import tab_financial
-from utils.vendor_performance.tabs import tab_product
+from utils.vendor_performance.tabs import tab_order_analysis
+from utils.vendor_performance.tabs import tab_invoice_analysis
+from utils.vendor_performance.tabs import tab_product_mix
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -56,13 +50,13 @@ except Exception as e:
 
 # Header
 st.title("🏭 Vendor Performance Analysis")
-st.markdown("Simplified analytics focused on order entry, invoiced value, and conversion rates")
+st.markdown("Multi-dimensional analytics: Orders, Invoices, and Products")
 
-# ==================== FILTERS SECTION ====================
+# ==================== GLOBAL FILTERS SECTION ====================
 st.markdown("---")
-st.subheader("🔧 Configuration")
+st.subheader("🔧 Global Configuration")
 
-col1, col2, col3 = st.columns([2, 1, 1])
+col1, col2 = st.columns([3, 1])
 
 with col1:
     # Vendor selection
@@ -85,25 +79,22 @@ with col1:
         st.warning("No vendors found in database")
 
 with col2:
-    # Period selection
-    period_type = st.selectbox(
-        "Analysis Period",
-        ["Monthly", "Quarterly", "Yearly"],
-        help="Grouping period for time series analysis"
-    )
-
-with col3:
-    # Time range
-    months_back = st.number_input(
-        "Months Back",
-        min_value=1,
-        max_value=24,
-        value=6,
-        help="Number of months to analyze"
+    # Legal Entity filter (NEW)
+    try:
+        entity_options = dao.get_entity_list()
+    except Exception as e:
+        logger.warning(f"Failed to load entity list: {e}")
+        entity_options = []
+    
+    entity_display_options = ["All Entities"] + entity_options
+    selected_entity_display = st.selectbox(
+        "Legal Entity",
+        entity_display_options,
+        help="Filter by legal entity (buyer company)"
     )
 
 # Advanced filters (collapsed by default)
-with st.expander("🔍 Advanced Filters", expanded=False):
+with st.expander("⚙️ Advanced Filters", expanded=False):
     col1, col2, col3 = st.columns(3)
     
     try:
@@ -134,7 +125,7 @@ with st.expander("🔍 Advanced Filters", expanded=False):
         )
 
 # Extract vendor name from display format
-selected_vendor_name = None
+selected_vendor_name: Optional[str] = None
 if selected_vendor_display != "All Vendors":
     if ' - ' in selected_vendor_display:
         _, selected_vendor_name = selected_vendor_display.split(' - ', 1)
@@ -142,122 +133,69 @@ if selected_vendor_display != "All Vendors":
     else:
         selected_vendor_name = selected_vendor_display.strip()
 
-# ==================== LOAD DATA ====================
-st.markdown("---")
-
-with st.spinner("Loading vendor performance data..."):
+# Extract entity ID
+selected_entity_id: Optional[int] = None
+if selected_entity_display != "All Entities":
     try:
-        # Load vendor summary
-        vendor_summary = dao.get_vendor_summary(
-            vendor_name=selected_vendor_name,
-            months=months_back
-        )
-        
-        # Load PO data
-        po_data = dao.get_po_data(
-            vendor_name=selected_vendor_name,
-            months=months_back,
-            filters={
-                'vendor_types': vendor_types if vendor_types else None,
-                'vendor_locations': vendor_locations if vendor_locations else None,
-                'payment_terms': payment_terms if payment_terms else None
-            }
-        )
-        
-        # Validate data
-        if vendor_summary is None:
-            vendor_summary = pd.DataFrame()
-        if po_data is None:
-            po_data = pd.DataFrame()
-        
-    except DataAccessError as e:
-        st.error(f"Failed to load data: {str(e)}")
-        logger.error(f"Data loading error: {e}", exc_info=True)
-        vendor_summary = pd.DataFrame()
-        po_data = pd.DataFrame()
+        # Assume format "ID - Name" or just fetch ID from database
+        selected_entity_id = dao.get_entity_id_by_display(selected_entity_display)
     except Exception as e:
-        st.error(f"Unexpected error: {str(e)}")
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        vendor_summary = pd.DataFrame()
-        po_data = pd.DataFrame()
+        logger.warning(f"Could not extract entity ID: {e}")
 
-# Check if we have data
-if vendor_summary.empty and po_data.empty:
-    st.warning("⚠️ No data available for the selected criteria. Please adjust your filters.")
-    st.stop()
+# Build common filters dict
+common_filters = {
+    'vendor_name': selected_vendor_name,
+    'entity_id': selected_entity_id,
+    'vendor_types': vendor_types if vendor_types else None,
+    'vendor_locations': vendor_locations if vendor_locations else None,
+    'payment_terms': payment_terms if payment_terms else None
+}
 
-# ==================== DATA SUMMARY ====================
-col1, col2, col3, col4 = st.columns(4)
+# Store in session state for tabs to access
+st.session_state['vendor_filters'] = common_filters
+st.session_state['selected_vendor_display'] = selected_vendor_display
 
-with col1:
-    vendor_count = len(vendor_summary) if not vendor_summary.empty else 0
-    st.metric("Vendors Loaded", f"{vendor_count:,}")
-
-with col2:
-    po_count = len(po_data) if not po_data.empty else 0
-    st.metric("PO Records", f"{po_count:,}")
-
-with col3:
-    if not vendor_summary.empty:
-        total_value = vendor_summary['total_order_value'].sum()
-        st.metric("Total Order Value", f"${total_value/1000000:.1f}M")
-    else:
-        st.metric("Total Order Value", "$0")
-
-with col4:
-    if not vendor_summary.empty:
-        avg_conversion = vendor_summary['conversion_rate'].mean()
-        st.metric(
-            "Avg Conversion", 
-            f"{avg_conversion:.1f}%",
-            delta=f"{avg_conversion - 90:.1f}% vs target",
-            delta_color="normal" if avg_conversion >= 90 else "inverse"
-        )
-    else:
-        st.metric("Avg Conversion", "N/A")
-
-# ==================== TABS ====================
 st.markdown("---")
 
+# ==================== TABS SECTION ====================
 tabs = st.tabs([
-    "📊 Overview",
-    "💰 Financial Performance",
+    "📈 Order Analysis",
+    "💰 Invoice Analysis",
     "📦 Product Mix"
 ])
 
 with tabs[0]:
     try:
-        tab_overview.render(
-            vendor_summary,
-            po_data,
-            selected_vendor_name or "All Vendors"
+        tab_order_analysis.render(
+            dao=dao,
+            filters=common_filters,
+            vendor_display=selected_vendor_display
         )
     except Exception as e:
-        st.error(f"Error rendering Overview tab: {str(e)}")
-        logger.error(f"Overview tab error: {e}", exc_info=True)
+        st.error(f"Error rendering Order Analysis tab: {str(e)}")
+        logger.error(f"Order Analysis tab error: {e}", exc_info=True)
 
 with tabs[1]:
     try:
-        tab_financial.render(
-            vendor_summary,
-            po_data,
-            period_type,
-            selected_vendor_name or "All Vendors"
+        tab_invoice_analysis.render(
+            dao=dao,
+            filters=common_filters,
+            vendor_display=selected_vendor_display
         )
     except Exception as e:
-        st.error(f"Error rendering Financial Performance tab: {str(e)}")
-        logger.error(f"Financial tab error: {e}", exc_info=True)
+        st.error(f"Error rendering Invoice Analysis tab: {str(e)}")
+        logger.error(f"Invoice Analysis tab error: {e}", exc_info=True)
 
 with tabs[2]:
     try:
-        tab_product.render(
-            po_data,
-            selected_vendor_name or "All Vendors",
-            dao  # Pass DAO for product summary query
+        tab_product_mix.render(
+            dao=dao,
+            filters=common_filters,
+            vendor_display=selected_vendor_display
         )
     except Exception as e:
         st.error(f"Error rendering Product Mix tab: {str(e)}")
-        logger.error(f"Product tab error: {e}", exc_info=True)
+        logger.error(f"Product Mix tab error: {e}", exc_info=True)
 
 # ==================== FOOTER ====================
 st.markdown("---")
@@ -268,12 +206,9 @@ with col1:
 
 with col2:
     if st.button("🔄 Refresh Data"):
-        # Clear specific caches
+        # Clear all caches
         try:
-            dao.get_vendor_list.clear()
-            dao.get_vendor_summary.clear()
-            dao.get_po_data.clear()
-            dao.get_product_summary.clear()
+            st.cache_data.clear()
         except:
             pass
         st.rerun()
@@ -283,32 +218,34 @@ with col3:
         st.info("""
         **Vendor Performance Analysis - User Guide:**
         
-        **Overview Tab:**
-        - Quick snapshot of vendor performance
-        - Key metrics: Order Value, Invoiced, Pending, Conversion
-        - Alerts and top products
+        **Three Analysis Views:**
         
-        **Financial Performance Tab:**
-        - Detailed order entry vs invoiced trends
-        - Periodic and cumulative views
-        - Monthly breakdown table
-        - Period-over-period comparison
+        **1. Order Analysis (PO-centric)**
+        - Tracks purchase orders by PO date
+        - Shows order entry value and fulfillment status
+        - Conversion rate: How much of ordered value has been invoiced
+        - Backlog: Orders not yet fully invoiced
         
-        **Product Mix Tab:**
-        - Product-level performance
-        - Visual treemap of product portfolio
-        - Product detail drill-down
-        - Recent order history
+        **2. Invoice Analysis (Payment-centric)**
+        - Analyzes invoices by invoice date
+        - Payment status and aging
+        - Outstanding amounts
+        - Different from orders because invoices may be for older POs
         
-        **Key Metrics:**
-        - **Order Entry Value**: Total value of purchase orders
-        - **Invoiced Value**: Amount actually delivered/invoiced
-        - **Pending Delivery**: Outstanding amount (Order - Invoiced)
-        - **Conversion Rate**: Invoiced / Order Entry × 100%
+        **3. Product Mix (Product-level)**
+        - Product performance analysis
+        - Can be analyzed by order date, invoice date, or delivery date
+        - Visual treemap and detailed drill-down
+        
+        **Key Concepts:**
+        - **Order Entry Value**: Total PO value (based on po_date)
+        - **Invoiced Value**: Amount invoiced (based on inv_date) 
+        - **Conversion Rate**: Invoiced / Ordered × 100%
+        - **Backlog**: Outstanding uninvoiced amount (based on ETD)
         
         **Tips:**
-        - Target conversion rate: ≥ 90%
-        - Use filters to narrow down analysis
-        - Download data for offline analysis
-        - Refresh data to get latest updates
+        - Each tab has its own date filter for focused analysis
+        - Use entity filter to analyze specific legal entities
+        - Export data for offline analysis
+        - Refresh to get latest updates
         """)
