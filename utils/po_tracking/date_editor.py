@@ -1,92 +1,96 @@
 """
-ETD/ETA Date Editor Module - Updated with Email Notification
-Handles editing of estimated dates for PO lines with email alerts
+ETD/ETA Date Editor Module - Enhanced with Bulk Update Support
+Handles bulk editing of estimated dates for multiple PO lines with email alerts
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def render_edit_button(po_line_id: int, row_data: Dict[str, Any]) -> None:
+def render_bulk_date_editor_modal(data_service, full_df: pd.DataFrame) -> None:
     """
-    Render edit button for a PO line
-    
-    Args:
-        po_line_id: Purchase order line ID
-        row_data: Dictionary containing row data for the PO line
-    """
-    button_key = f"edit_btn_{po_line_id}"
-    
-    if st.button("✏️", key=button_key, help="Edit ETD/ETA", use_container_width=True):
-        st.session_state.editing_po_line = po_line_id
-        st.session_state.editing_row_data = row_data
-        st.rerun()
-
-
-def render_date_editor_modal(data_service) -> None:
-    """
-    Render modal dialog for editing ETD/ETA dates with email notification
+    Render modal dialog for bulk editing ETD/ETA dates
     
     Args:
         data_service: PODataService instance for database operations
+        full_df: Full dataframe with all PO data
     """
-    if 'editing_po_line' not in st.session_state:
+    if 'show_bulk_editor' not in st.session_state or not st.session_state.show_bulk_editor:
         return
     
-    po_line_id = st.session_state.editing_po_line
-    row_data = st.session_state.editing_row_data
+    if 'selected_po_lines' not in st.session_state or not st.session_state.selected_po_lines:
+        st.warning("No lines selected for editing")
+        return
     
-    @st.dialog(f"✏️ Update ETD/ETA - PO Line #{po_line_id}", width="large")
-    def show_editor():
-        # Display PO information
-        st.markdown("**Purchase Order Information:**")
+    selected_line_ids = list(st.session_state.selected_po_lines)
+    selected_count = len(selected_line_ids)
+    
+    # Get selected lines data
+    selected_lines = full_df[full_df['po_line_id'].isin(selected_line_ids)].copy()
+    
+    if selected_lines.empty:
+        st.warning("Selected lines not found in current data")
+        return
+    
+    @st.dialog(f"✏️ Bulk Update ETD/ETA - {selected_count} Lines", width="large")
+    def show_bulk_editor():
+        st.markdown(f"**Updating {selected_count} PO line{'s' if selected_count > 1 else ''}**")
         
-        info_col1, info_col2 = st.columns(2)
-        with info_col1:
-            st.text(f"PO Number: {row_data.get('po_number', 'N/A')}")
-            st.text(f"Product: {row_data.get('product_name', 'N/A')}")
-            st.text(f"PT Code: {row_data.get('pt_code', 'N/A')}")
+        # Show summary of affected POs
+        affected_pos = selected_lines['po_number'].unique()
+        if len(affected_pos) <= 5:
+            st.info(f"**Affected POs:** {', '.join(affected_pos)}")
+        else:
+            st.info(f"**Affected POs:** {len(affected_pos)} different purchase orders")
         
-        with info_col2:
-            st.text(f"Vendor: {row_data.get('vendor_name', 'N/A')}")
-            st.text(f"Buying Qty: {row_data.get('buying_quantity', 0)}")
-            st.text(f"Status: {row_data.get('status', 'N/A')}")
+        # Show preview of selected lines (limit to 10)
+        st.markdown("**Selected Lines Preview:**")
+        preview_df = selected_lines[['po_number', 'product_name', 'pt_code', 'etd', 'eta']].head(10)
+        st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        
+        if selected_count > 10:
+            st.caption(f"... and {selected_count - 10} more lines")
         
         st.markdown("---")
         
-        # Display current dates
-        current_etd = row_data.get('etd')
-        current_eta = row_data.get('eta')
+        # Check for date variations
+        unique_etds = selected_lines['etd'].dropna().unique()
+        unique_etas = selected_lines['eta'].dropna().unique()
         
-        st.markdown("**Current Dates:**")
-        date_info = f"""
-        - **Current ETD:** {format_date(current_etd)}
-        - **Current ETA:** {format_date(current_eta)}
-        """
-        st.info(date_info)
-        
-        st.markdown("**New Dates:**")
+        if len(unique_etds) > 1 or len(unique_etas) > 1:
+            st.warning(
+                f"⚠️ **Note:** Selected lines have different current dates\n\n"
+                f"- {len(unique_etds)} different ETD values\n"
+                f"- {len(unique_etas)} different ETA values\n\n"
+                f"All lines will be updated to the same new dates."
+            )
         
         # Date inputs
+        st.markdown("**New Dates (will apply to all selected lines):**")
+        
         col1, col2 = st.columns(2)
+        
+        # Get most common or earliest date as default
+        default_etd = selected_lines['etd'].min() if not selected_lines['etd'].isna().all() else date.today()
+        default_eta = selected_lines['eta'].min() if not selected_lines['eta'].isna().all() else date.today()
         
         with col1:
             new_etd = st.date_input(
                 "New ETD",
-                value=parse_date(current_etd) if current_etd else date.today(),
-                key="new_etd_input"
+                value=parse_date(default_etd) if default_etd else date.today(),
+                key="bulk_new_etd_input"
             )
         
         with col2:
             new_eta = st.date_input(
                 "New ETA",
-                value=parse_date(current_eta) if current_eta else date.today(),
-                key="new_eta_input"
+                value=parse_date(default_eta) if default_eta else date.today(),
+                key="bulk_new_eta_input"
             )
         
         # Validation
@@ -97,16 +101,17 @@ def render_date_editor_modal(data_service) -> None:
         st.markdown("**Reason for Change:** *(Required for email notification)*")
         reason = st.text_area(
             "Reason",
-            placeholder="e.g., Vendor delayed shipment due to customs issues",
-            height=80,
-            label_visibility="collapsed"
+            placeholder="e.g., Vendor confirmed shipment delay due to customs clearance",
+            height=100,
+            label_visibility="collapsed",
+            key="bulk_reason_input"
         )
         
         # Email notification toggle
         send_email = st.checkbox(
-            "📧 Send email notification to creator and CC: po.update@prostech.vn",
+            "📧 Send consolidated email notification",
             value=True,
-            help="Uncheck to update without sending email"
+            help="One email will be sent with all changes"
         )
         
         st.markdown("---")
@@ -117,100 +122,97 @@ def render_date_editor_modal(data_service) -> None:
         
         with col2:
             if st.button("Cancel", use_container_width=True):
-                close_editor()
+                close_bulk_editor()
                 st.rerun()
         
         with col3:
-            if st.button("💾 Save Changes", type="primary", use_container_width=True):
-                save_date_changes(
-                    data_service=data_service,
-                    po_line_id=po_line_id,
-                    new_etd=new_etd,
-                    new_eta=new_eta,
-                    reason=reason,
-                    old_etd=current_etd,
-                    old_eta=current_eta,
-                    send_email=send_email,
-                    row_data=row_data
-                )
+            if st.button(
+                f"💾 Update {selected_count} Line{'s' if selected_count > 1 else ''}",
+                type="primary",
+                use_container_width=True
+            ):
+                if not reason or reason.strip() == "":
+                    st.error("⚠️ Please provide a reason for the date change")
+                else:
+                    save_bulk_date_changes(
+                        data_service=data_service,
+                        selected_lines=selected_lines,
+                        new_etd=new_etd,
+                        new_eta=new_eta,
+                        reason=reason.strip(),
+                        send_email=send_email
+                    )
     
-    show_editor()
+    show_bulk_editor()
 
 
-def save_date_changes(
+def save_bulk_date_changes(
     data_service,
-    po_line_id: int,
+    selected_lines: pd.DataFrame,
     new_etd: date,
     new_eta: date,
     reason: str,
-    old_etd: Any,
-    old_eta: Any,
-    send_email: bool,
-    row_data: Dict[str, Any]
+    send_email: bool
 ) -> None:
     """
-    Save ETD/ETA changes to database and send email notification
+    Save bulk ETD/ETA changes to database and send consolidated email
     
     Args:
         data_service: PODataService instance
-        po_line_id: PO line ID to update
+        selected_lines: DataFrame of selected lines
         new_etd: New ETD date
         new_eta: New ETA date
         reason: Reason for change
-        old_etd: Old ETD for comparison
-        old_eta: Old ETA for comparison
         send_email: Whether to send email notification
-        row_data: Complete row data for email
     """
     try:
-        # Check if dates actually changed
-        old_etd_date = parse_date(old_etd)
-        old_eta_date = parse_date(old_eta)
+        line_ids = selected_lines['po_line_id'].tolist()
         
-        if new_etd == old_etd_date and new_eta == old_eta_date:
-            st.warning("No changes detected. Dates are the same.")
-            return
-        
-        # Call data service to update
-        success = data_service.update_po_line_dates(
-            po_line_id=po_line_id,
-            adjust_etd=new_etd,
-            adjust_eta=new_eta,
-            reason=reason
-        )
+        with st.spinner(f"Updating {len(line_ids)} lines..."):
+            # Progress bar
+            progress_bar = st.progress(0)
+            
+            # Call bulk update method
+            success = data_service.bulk_update_po_line_dates(
+                po_line_ids=line_ids,
+                adjust_etd=new_etd,
+                adjust_eta=new_eta,
+                reason=reason
+            )
+            
+            progress_bar.progress(100)
         
         if success:
-            # Calculate day differences
-            etd_diff = (new_etd - old_etd_date).days if old_etd_date else 0
-            eta_diff = (new_eta - old_eta_date).days if old_eta_date else 0
+            st.success(f"✅ Successfully updated {len(line_ids)} PO lines!")
             
-            # Show success message
-            st.success(f"""
-            ✅ ETD/ETA updated successfully for PO Line #{po_line_id}
-            - ETD: {format_date(old_etd_date)} → {format_date(new_etd)} ({etd_diff:+d} days)
-            - ETA: {format_date(old_eta_date)} → {format_date(new_eta)} ({eta_diff:+d} days)
-            """)
-            
-            # Send email notification if requested
+            # Send consolidated email if requested
             if send_email:
                 try:
                     from utils.po_tracking.email_service import POEmailService
                     
                     email_service = POEmailService()
                     
-                    # Get modifier info from session state
+                    # Get modifier info
                     modifier_email = st.session_state.get('user_email', 'unknown@prostech.vn')
                     modifier_name = st.session_state.get('user_fullname', 'Unknown User')
                     
                     with st.spinner("📧 Sending email notification..."):
-                        email_sent = email_service.send_etd_eta_update_notification(
-                            po_line_id=po_line_id,
-                            po_number=row_data.get('po_number', 'N/A'),
-                            product_name=row_data.get('product_name', 'N/A'),
-                            vendor_name=row_data.get('vendor_name', 'N/A'),
-                            old_etd=old_etd_date,
+                        # Prepare line details for email
+                        line_details = []
+                        for _, row in selected_lines.iterrows():
+                            line_details.append({
+                                'po_line_id': row['po_line_id'],
+                                'po_number': row['po_number'],
+                                'product_name': row['product_name'],
+                                'pt_code': row.get('pt_code', 'N/A'),
+                                'vendor_name': row['vendor_name'],
+                                'old_etd': parse_date(row['etd']),
+                                'old_eta': parse_date(row['eta'])
+                            })
+                        
+                        email_sent = email_service.send_bulk_etd_eta_update_notification(
+                            line_details=line_details,
                             new_etd=new_etd,
-                            old_eta=old_eta_date,
                             new_eta=new_eta,
                             modifier_email=modifier_email,
                             modifier_name=modifier_name,
@@ -220,15 +222,17 @@ def save_date_changes(
                     if email_sent:
                         st.success("📧 Email notification sent successfully!")
                     else:
-                        st.warning("⚠️ Date updated but email notification failed. Please check logs.")
+                        st.warning("⚠️ Dates updated but email notification failed. Please check logs.")
                 
                 except Exception as e:
-                    logger.error(f"Error sending email: {e}", exc_info=True)
-                    st.warning(f"⚠️ Date updated but email failed: {str(e)}")
+                    logger.error(f"Error sending bulk email: {e}", exc_info=True)
+                    st.warning(f"⚠️ Dates updated but email failed: {str(e)}")
             
-            # Clear cache and close editor
+            # Clear cache and selections
             st.cache_data.clear()
-            close_editor()
+            st.session_state.selected_po_lines = set()
+            st.session_state.select_all_checked = False
+            close_bulk_editor()
             
             # Rerun to refresh data
             st.rerun()
@@ -236,16 +240,14 @@ def save_date_changes(
             st.error("⚠️ Failed to update dates. Please try again or contact support.")
     
     except Exception as e:
-        logger.error(f"Error saving date changes: {e}", exc_info=True)
+        logger.error(f"Error saving bulk date changes: {e}", exc_info=True)
         st.error(f"⚠️ Error: {str(e)}")
 
 
-def close_editor() -> None:
-    """Close the date editor modal"""
-    if 'editing_po_line' in st.session_state:
-        del st.session_state.editing_po_line
-    if 'editing_row_data' in st.session_state:
-        del st.session_state.editing_row_data
+def close_bulk_editor() -> None:
+    """Close the bulk date editor modal"""
+    if 'show_bulk_editor' in st.session_state:
+        st.session_state.show_bulk_editor = False
 
 
 def format_date(date_value: Any) -> str:

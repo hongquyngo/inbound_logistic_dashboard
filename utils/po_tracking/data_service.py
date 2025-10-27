@@ -1,6 +1,6 @@
 """
-Data Service for PO Tracking - Updated with Sorting
-Handles all database operations with proper SQL parameterization
+Data Service for PO Tracking - Enhanced with Bulk Update Support
+Handles all database operations including bulk ETD/ETA updates
 """
 
 import pandas as pd
@@ -50,6 +50,12 @@ class PODataService:
                     WHERE vendor_name IS NOT NULL 
                         AND vendor_code IS NOT NULL
                     ORDER BY vendor_name
+                """,
+                'po_numbers': """
+                    SELECT DISTINCT po_number
+                    FROM purchase_order_full_view 
+                    WHERE po_number IS NOT NULL
+                    ORDER BY po_number DESC
                 """,
                 'products': """
                     SELECT DISTINCT 
@@ -152,6 +158,7 @@ class PODataService:
             return {
                 'legal_entities': [],
                 'vendors': [],
+                'po_numbers': [],
                 'products': [],
                 'brands': [],
                 'creators': [],
@@ -276,7 +283,7 @@ class PODataService:
             if query_parts:
                 base_query += f" AND {query_parts}"
             
-            # ✅ NEW: Order by vendor_name ASC, po_date ASC (oldest first)
+            # Order by vendor_name ASC, po_date ASC (oldest first)
             base_query += """
             ORDER BY 
                 vendor_name ASC,
@@ -296,18 +303,18 @@ class PODataService:
             st.error(f"Failed to load purchase order data: {str(e)}")
             return pd.DataFrame()
     
-    def update_po_line_dates(
+    def bulk_update_po_line_dates(
         self, 
-        po_line_id: int, 
+        po_line_ids: List[int],
         adjust_etd: date, 
         adjust_eta: date,
         reason: Optional[str] = None
     ) -> bool:
         """
-        Update ETD/ETA dates for a PO line and update the PO header
+        Bulk update ETD/ETA dates for multiple PO lines
         
         Args:
-            po_line_id: PO line ID to update
+            po_line_ids: List of PO line IDs to update
             adjust_etd: New adjusted ETD
             adjust_eta: New adjusted ETA
             reason: Reason for the change (for logging)
@@ -316,6 +323,10 @@ class PODataService:
             bool: True if successful, False otherwise
         """
         try:
+            if not po_line_ids:
+                logger.warning("No PO line IDs provided for bulk update")
+                return False
+            
             # Get current user's keycloak_id from session state
             user_keycloak_id = st.session_state.get('user_keycloak_id')
             user_email = st.session_state.get('user_email', 'unknown')
@@ -326,8 +337,11 @@ class PODataService:
             
             # Use transaction to update both tables atomically
             with self.engine.begin() as conn:
-                # Step 1: Update PO line dates and counters
-                update_line_query = text("""
+                # Create placeholders for IN clause
+                placeholders = ', '.join([f':id{i}' for i in range(len(po_line_ids))])
+                
+                # Step 1: Bulk update PO line dates and counters
+                update_line_query = text(f"""
                     UPDATE product_purchase_orders 
                     SET 
                         adjust_etd = :adjust_etd,
@@ -335,27 +349,28 @@ class PODataService:
                         etd_update_count = etd_update_count + 1,
                         eta_update_count = eta_update_count + 1
                     WHERE 
-                        id = :po_line_id
+                        id IN ({placeholders})
                         AND delete_flag = 0
                 """)
                 
-                result = conn.execute(
-                    update_line_query,
-                    {
-                        'po_line_id': po_line_id,
-                        'adjust_etd': adjust_etd,
-                        'adjust_eta': adjust_eta
-                    }
-                )
+                # Build parameters
+                params = {
+                    'adjust_etd': adjust_etd,
+                    'adjust_eta': adjust_eta
+                }
+                params.update({f'id{i}': line_id for i, line_id in enumerate(po_line_ids)})
                 
+                result = conn.execute(update_line_query, params)
                 rows_affected = result.rowcount
                 
                 if rows_affected == 0:
-                    logger.warning(f"No PO line found with id {po_line_id}")
+                    logger.warning(f"No PO lines found with ids {po_line_ids}")
                     return False
                 
-                # Step 2: Update PO header with updated_by (keycloak_id) and updated_date
-                update_header_query = text("""
+                logger.info(f"Bulk updated {rows_affected} PO lines")
+                
+                # Step 2: Update all affected PO headers
+                update_header_query = text(f"""
                     UPDATE purchase_orders po
                     INNER JOIN product_purchase_orders ppo 
                         ON po.id = ppo.purchase_order_id
@@ -363,30 +378,26 @@ class PODataService:
                         po.updated_by = :updated_by,
                         po.updated_date = NOW()
                     WHERE 
-                        ppo.id = :po_line_id
+                        ppo.id IN ({placeholders})
                         AND po.delete_flag = 0
                 """)
                 
-                conn.execute(
-                    update_header_query,
-                    {
-                        'po_line_id': po_line_id,
-                        'updated_by': user_keycloak_id
-                    }
-                )
+                params_header = {'updated_by': user_keycloak_id}
+                params_header.update({f'id{i}': line_id for i, line_id in enumerate(po_line_ids)})
                 
-                # Log the change with user info and reason
+                conn.execute(update_header_query, params_header)
+                
+                # Log the change
                 logger.info(
-                    f"Updated PO line {po_line_id} dates: "
+                    f"Bulk updated {rows_affected} PO lines: "
                     f"adjust_etd={adjust_etd}, adjust_eta={adjust_eta}, "
-                    f"Reason='{reason}', User={user_email} (keycloak_id: {user_keycloak_id}), "
-                    f"Updated header with user tracking"
+                    f"Reason='{reason}', User={user_email} (keycloak_id: {user_keycloak_id})"
                 )
                 
                 return True
             
         except Exception as e:
-            logger.error(f"Error updating PO line dates: {e}", exc_info=True)
+            logger.error(f"Error in bulk update of PO line dates: {e}", exc_info=True)
             return False
     
     @st.cache_data(ttl=300)

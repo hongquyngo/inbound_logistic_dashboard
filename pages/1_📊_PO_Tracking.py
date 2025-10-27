@@ -1,6 +1,6 @@
 """
 Purchase Order Tracking Dashboard
-Enhanced with column selection and ETD/ETA editing
+Enhanced with bulk ETD/ETA editing and column selection
 """
 
 import streamlit as st
@@ -55,7 +55,7 @@ data_service = PODataService()
 st.title("📊 Purchase Order Tracking")
 st.markdown("""
 Track and manage purchase orders with real-time status updates, 
-financial analytics, and supply chain visibility.
+financial analytics, and **bulk ETD/ETA editing** capabilities.
 """)
 
 # ============================================
@@ -98,7 +98,7 @@ if po_df is not None and not po_df.empty:
     tab1, tab2 = st.tabs(["📋 Detailed List", "📊 Analytics"])
     
     with tab1:
-        # Pass data_service for ETD/ETA editing
+        # Pass data_service and full dataframe for bulk editing
         render_detail_list(po_df, data_service=data_service)
     
     with tab2:
@@ -142,6 +142,11 @@ with st.sidebar:
     
     if st.button("🔃 Refresh Data", use_container_width=True):
         st.cache_data.clear()
+        # Clear selection state when refreshing
+        if 'selected_po_lines' in st.session_state:
+            st.session_state.selected_po_lines = set()
+        if 'select_all_checked' in st.session_state:
+            st.session_state.select_all_checked = False
         st.rerun()
     
     if st.button("🏠 Reset Filters", use_container_width=True):
@@ -149,6 +154,11 @@ with st.sidebar:
         for key in list(st.session_state.keys()):
             if key.startswith('filter_') or key.startswith('excl_'):
                 del st.session_state[key]
+        # Clear selections
+        if 'selected_po_lines' in st.session_state:
+            st.session_state.selected_po_lines = set()
+        if 'select_all_checked' in st.session_state:
+            st.session_state.select_all_checked = False
         st.rerun()
     
     st.markdown("---")
@@ -174,3 +184,16 @@ with st.sidebar:
             cancellations = sum(po_df['has_cancellation'] == 'Y')
             if cancellations > 0:
                 st.info(f"ℹ️ {cancellations} with cancellations")
+        
+        st.markdown("---")
+        
+        # Bulk selection info
+        if 'selected_po_lines' in st.session_state and st.session_state.selected_po_lines:
+            selected_count = len(st.session_state.selected_po_lines)
+            st.markdown("## ✅ Selection")
+            st.info(f"**{selected_count}** line{'s' if selected_count > 1 else ''} selected")
+            
+            if st.button("🗑️ Clear All Selections", use_container_width=True):
+                st.session_state.selected_po_lines = set()
+                st.session_state.select_all_checked = False
+                st.rerun()

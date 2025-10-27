@@ -1,25 +1,30 @@
-# utils/po_tracking/formatters.py
-
 """
-Formatters Module for PO Tracking - Clean Version
-Handles display formatting for PO tracking dashboard
+Formatters Module for PO Tracking - Enhanced with Bulk Selection
+Handles display formatting with checkbox selection for bulk ETD/ETA updates
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import date
-from typing import List
+from typing import List, Set
 from utils.po_tracking.column_config import (
     render_column_selector,
     get_column_display_name,
     COLUMN_DEFINITIONS
 )
 from utils.po_tracking.date_editor import (
-    render_edit_button,
-    render_date_editor_modal,
+    render_bulk_date_editor_modal,
     is_date_overdue,
     parse_date
 )
+
+
+def initialize_selection_state() -> None:
+    """Initialize selection state in session"""
+    if 'selected_po_lines' not in st.session_state:
+        st.session_state.selected_po_lines = set()
+    if 'select_all_checked' not in st.session_state:
+        st.session_state.select_all_checked = False
 
 
 def render_metrics(po_df: pd.DataFrame) -> None:
@@ -50,7 +55,7 @@ def render_metrics(po_df: pd.DataFrame) -> None:
 
 def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
     """
-    Render detailed PO list with column selection and edit functionality
+    Render detailed PO list with checkbox selection for bulk operations
     
     Args:
         po_df: Purchase order dataframe
@@ -62,55 +67,220 @@ def render_detail_list(po_df: pd.DataFrame, data_service=None) -> None:
         st.info("No data to display")
         return
     
+    # Initialize selection state
+    initialize_selection_state()
+    
+    # Column selector
     selected_columns = render_column_selector()
     
     if not selected_columns:
         st.warning("⚠️ No columns selected. Please select columns to display.")
         return
     
+    # Summary info
     overdue_count = count_overdue_rows(po_df)
-    col1, col2 = st.columns([3, 1])
+    selected_count = len(st.session_state.selected_po_lines)
+    
+    col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         st.caption(f"Showing {len(po_df):,} records")
     with col2:
+        if selected_count > 0:
+            st.caption(f"✅ **{selected_count} lines selected**")
+    with col3:
         if overdue_count > 0:
-            st.caption(f"⚠️ {overdue_count} overdue ETD/ETA")
+            st.caption(f"⚠️ {overdue_count} overdue")
     
+    # Bulk action buttons (only show when items selected)
+    if selected_count > 0:
+        render_bulk_action_buttons(selected_count)
+    
+    # Render table
     display_df = prepare_display_dataframe(po_df, selected_columns)
-    render_table_with_actions(display_df, po_df, selected_columns, data_service)
+    render_table_with_checkboxes(display_df, po_df, selected_columns)
     
+    # Bulk edit modal
     if data_service:
-        render_date_editor_modal(data_service)
+        render_bulk_date_editor_modal(data_service, po_df)
     
     st.markdown("---")
     st.caption("**Legend:** ⚠️ Warning emoji on date cells = Overdue ETD or ETA (past today)")
     
-    col1, col2, col3 = st.columns([1, 1, 4])
+    # Export buttons
+    render_export_buttons(po_df, selected_columns)
+
+
+def render_bulk_action_buttons(selected_count: int) -> None:
+    """
+    Render bulk action buttons when items are selected
+    
+    Args:
+        selected_count: Number of selected items
+    """
+    st.markdown("---")
+    
+    col1, col2, col3 = st.columns([1, 1, 3])
     
     with col1:
-        csv = po_df[selected_columns].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        if st.button(
+            f"✏️ Edit {selected_count} Line{'s' if selected_count > 1 else ''}",
+            type="primary",
+            use_container_width=True,
+            key="bulk_edit_btn"
+        ):
+            st.session_state.show_bulk_editor = True
+            st.rerun()
     
     with col2:
-        from io import BytesIO
+        if st.button(
+            "🗑️ Clear Selection",
+            use_container_width=True,
+            key="clear_selection_btn"
+        ):
+            st.session_state.selected_po_lines = set()
+            st.session_state.select_all_checked = False
+            st.rerun()
+    
+    st.markdown("---")
+
+
+def render_table_with_checkboxes(
+    display_df: pd.DataFrame, 
+    original_df: pd.DataFrame,
+    selected_columns: List[str]
+) -> None:
+    """
+    Render dataframe with checkbox selection
+    
+    Args:
+        display_df: Formatted dataframe for display
+        original_df: Original dataframe with all data
+        selected_columns: List of selected columns
+    """
+    if 'page_number' not in st.session_state:
+        st.session_state.page_number = 1
+    
+    rows_per_page = 50
+    total_rows = len(display_df)
+    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+    
+    start_idx = (st.session_state.page_number - 1) * rows_per_page
+    end_idx = min(start_idx + rows_per_page, total_rows)
+    
+    display_df_page = display_df.iloc[start_idx:end_idx]
+    original_df_page = original_df.iloc[start_idx:end_idx]
+    
+    # Get all PO line IDs in current filtered results
+    all_po_line_ids = set(original_df['po_line_id'].tolist())
+    current_page_ids = set(original_df_page['po_line_id'].tolist())
+    
+    with st.container():
+        # Header row with "Select All" checkbox
+        header_cols = st.columns([0.5] + [3] * len(display_df_page.columns))
         
-        excel_buffer = BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-            po_df[selected_columns].to_excel(writer, index=False, sheet_name='PO Data')
+        with header_cols[0]:
+            # Determine checkbox state: checked if ALL filtered results are selected
+            all_selected = all_po_line_ids.issubset(st.session_state.selected_po_lines)
+            
+            select_all = st.checkbox(
+                "",
+                value=all_selected,
+                key="select_all_header",
+                label_visibility="collapsed"
+            )
+            
+            # Handle select all toggle - affects both filtered results AND current page display
+            if select_all != st.session_state.select_all_checked:
+                st.session_state.select_all_checked = select_all
+                if select_all:
+                    # Select ALL filtered results (not just current page)
+                    st.session_state.selected_po_lines.update(all_po_line_ids)
+                else:
+                    # Deselect ALL filtered results
+                    st.session_state.selected_po_lines -= all_po_line_ids
+                st.rerun()
         
-        st.download_button(
-            label="📥 Download Excel",
-            data=excel_buffer.getvalue(),
-            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+        for idx, col_name in enumerate(display_df_page.columns):
+            with header_cols[idx + 1]:
+                st.markdown(f"**{col_name}**")
+        
+        st.divider()
+        
+        # Data rows with individual checkboxes
+        for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
+            original_row = original_df_page.iloc[idx]
+            po_line_id = original_row['po_line_id']
+            
+            row_cols = st.columns([0.5] + [3] * len(row))
+            
+            # Checkbox column
+            with row_cols[0]:
+                is_selected = po_line_id in st.session_state.selected_po_lines
+                
+                checkbox_key = f"checkbox_{po_line_id}_{st.session_state.page_number}"
+                
+                if st.checkbox(
+                    "",
+                    value=is_selected,
+                    key=checkbox_key,
+                    label_visibility="collapsed"
+                ):
+                    if po_line_id not in st.session_state.selected_po_lines:
+                        st.session_state.selected_po_lines.add(po_line_id)
+                else:
+                    if po_line_id in st.session_state.selected_po_lines:
+                        st.session_state.selected_po_lines.discard(po_line_id)
+            
+            # Data columns
+            for col_idx, (col_name, value) in enumerate(row.items()):
+                with row_cols[col_idx + 1]:
+                    is_date_col_overdue = False
+                    
+                    if col_name in ['ETD', 'ETA']:
+                        original_col_key = 'etd' if col_name == 'ETD' else 'eta'
+                        if original_col_key in original_row:
+                            is_date_col_overdue = is_date_overdue(original_row[original_col_key])
+                    
+                    display_value = str(value) if pd.notna(value) else ""
+                    if len(display_value) > 50:
+                        display_value = display_value[:47] + "..."
+                    
+                    if is_date_col_overdue:
+                        display_value = f"⚠️ {display_value}"
+                    
+                    # Highlight selected rows
+                    if po_line_id in st.session_state.selected_po_lines:
+                        st.markdown(
+                            f"<div style='background-color: #e3f2fd; padding: 4px; border-radius: 3px;'>{display_value}</div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.text(display_value)
+            
+            if idx < len(display_df_page) - 1:
+                st.markdown("")
+    
+    # Pagination
+    st.divider()
+    col1, col2, col3 = st.columns([2, 1, 2])
+    
+    with col1:
+        if st.session_state.page_number > 1:
+            if st.button("← Previous", use_container_width=True, key="po_prev"):
+                st.session_state.page_number -= 1
+                st.rerun()
+    
+    with col2:
+        st.markdown(
+            f"<div style='text-align: center; padding-top: 8px;'>Page {st.session_state.page_number} of {total_pages}</div>", 
+            unsafe_allow_html=True
         )
+    
+    with col3:
+        if st.session_state.page_number < total_pages:
+            if st.button("Next →", use_container_width=True, key="po_next"):
+                st.session_state.page_number += 1
+                st.rerun()
 
 
 def prepare_display_dataframe(po_df: pd.DataFrame, selected_columns: List[str]) -> pd.DataFrame:
@@ -144,99 +314,40 @@ def prepare_display_dataframe(po_df: pd.DataFrame, selected_columns: List[str]) 
     return display_df
 
 
-def render_table_with_actions(
-    display_df: pd.DataFrame, 
-    original_df: pd.DataFrame,
-    selected_columns: List[str],
-    data_service
-) -> None:
+def render_export_buttons(po_df: pd.DataFrame, selected_columns: List[str]) -> None:
     """
-    Render dataframe with action buttons and overdue highlighting
+    Render CSV and Excel export buttons
     
     Args:
-        display_df: Formatted dataframe for display
-        original_df: Original dataframe with all data
+        po_df: Purchase order dataframe
         selected_columns: List of selected columns
-        data_service: PODataService instance
     """
-    if 'page_number' not in st.session_state:
-        st.session_state.page_number = 1
-    
-    rows_per_page = 50
-    total_rows = len(display_df)
-    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
-    
-    start_idx = (st.session_state.page_number - 1) * rows_per_page
-    end_idx = min(start_idx + rows_per_page, total_rows)
-    
-    display_df_page = display_df.iloc[start_idx:end_idx]
-    original_df_page = original_df.iloc[start_idx:end_idx]
-    
-    with st.container():
-        header_cols = st.columns([1] + [3] * len(display_df_page.columns))
-        
-        with header_cols[0]:
-            st.markdown("**Actions**")
-        
-        for idx, col_name in enumerate(display_df_page.columns):
-            with header_cols[idx + 1]:
-                st.markdown(f"**{col_name}**")
-        
-        st.divider()
-        
-        for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
-            original_row = original_df_page.iloc[idx]
-            
-            row_cols = st.columns([1] + [3] * len(row))
-            
-            with row_cols[0]:
-                po_line_id = original_row['po_line_id']
-                render_edit_button(
-                    po_line_id=po_line_id,
-                    row_data=original_row.to_dict()
-                )
-            
-            for col_idx, (col_name, value) in enumerate(row.items()):
-                with row_cols[col_idx + 1]:
-                    is_date_col_overdue = False
-                    
-                    if col_name in ['ETD', 'ETA']:
-                        original_col_key = 'etd' if col_name == 'ETD' else 'eta'
-                        if original_col_key in original_row:
-                            is_date_col_overdue = is_date_overdue(original_row[original_col_key])
-                    
-                    display_value = str(value) if pd.notna(value) else ""
-                    if len(display_value) > 50:
-                        display_value = display_value[:47] + "..."
-                    
-                    if is_date_col_overdue:
-                        display_value = f"⚠️ {display_value}"
-                    
-                    st.text(display_value)
-            
-            if idx < len(display_df_page) - 1:
-                st.markdown("")
-    
-    st.divider()
-    col1, col2, col3 = st.columns([2, 1, 2])
+    col1, col2, col3 = st.columns([1, 1, 4])
     
     with col1:
-        if st.session_state.page_number > 1:
-            if st.button("← Previous", use_container_width=True, key="po_prev"):
-                st.session_state.page_number -= 1
-                st.rerun()
-    
-    with col2:
-        st.markdown(
-            f"<div style='text-align: center; padding-top: 8px;'>Page {st.session_state.page_number} of {total_pages}</div>", 
-            unsafe_allow_html=True
+        csv = po_df[selected_columns].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True
         )
     
-    with col3:
-        if st.session_state.page_number < total_pages:
-            if st.button("Next →", use_container_width=True, key="po_next"):
-                st.session_state.page_number += 1
-                st.rerun()
+    with col2:
+        from io import BytesIO
+        
+        excel_buffer = BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            po_df[selected_columns].to_excel(writer, index=False, sheet_name='PO Data')
+        
+        st.download_button(
+            label="📥 Download Excel",
+            data=excel_buffer.getvalue(),
+            file_name=f"po_tracking_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
 
 def row_has_overdue_dates(row: pd.Series) -> bool:

@@ -1,5 +1,5 @@
 """
-Filter UI Components and SQL Builder
+Filter UI Components and SQL Builder - Enhanced with PO Number Filter
 Handles all filter rendering and SQL query building with exclusion logic
 """
 
@@ -107,10 +107,24 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
                 label_visibility="collapsed"
             )
         
-        # Products
-        col1, col2 = st.columns(2)
+        # 🆕 PO Number, Products & Brands (same row - 3 columns)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
+            label_col, excl_col = st.columns([6, 1])
+            with label_col:
+                st.markdown("**PO Numbers**")
+            with excl_col:
+                excl_po_numbers = st.checkbox("Excl", key="excl_po_numbers")
+            po_numbers = st.multiselect(
+                "PO Numbers",
+                options=filter_options.get('po_numbers', []),
+                default=None,
+                placeholder="Search PO numbers...",
+                label_visibility="collapsed"
+            )
+        
+        with col2:
             label_col, excl_col = st.columns([6, 1])
             with label_col:
                 st.markdown("**Products**")
@@ -124,7 +138,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
                 label_visibility="collapsed"
             )
         
-        with col2:
+        with col3:
             label_col, excl_col = st.columns([6, 1])
             with label_col:
                 st.markdown("**Brands**")
@@ -190,6 +204,8 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
         'excl_legal_entities': excl_legal_entities,
         'vendors': vendors,
         'excl_vendors': excl_vendors,
+        'po_numbers': po_numbers,
+        'excl_po_numbers': excl_po_numbers,
         'products': products,
         'excl_products': excl_products,
         'brands': brands,
@@ -316,6 +332,9 @@ def build_sql_params(filters: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     
     add_filter('vendor_name', filters.get('vendors'),
                filters.get('excl_vendors', False), 'vendors')
+    
+    add_filter('po_number', filters.get('po_numbers'),
+               filters.get('excl_po_numbers', False), 'po_numbers')
     
     add_filter('product_name', filters.get('products'),
                filters.get('excl_products', False), 'products')
