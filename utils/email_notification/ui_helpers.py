@@ -1,13 +1,15 @@
 # utils/email_notification/ui_helpers.py
 """
-UI Helper functions for Email Notification page
-Streamlit component rendering and data processing helpers
+UI Helper functions for Email Notification page - IMPROVED VERSION
+Added features:
+1. Buying Legal Entity filter
+2. Data preview with row selection before sending
 """
 
 import streamlit as st
 import pandas as pd
 import re
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
@@ -35,7 +37,10 @@ def initialize_session_state():
         'date_type': 'ETD',
         'recipient_type': 'creators',
         'selected_vendors': [],
-        'selected_vendor_contacts': []
+        'selected_vendor_contacts': [],
+        'legal_entities': [],  # NEW: Store selected entities
+        'preview_data': {},  # NEW: Store preview data for each recipient
+        'selected_rows': {}  # NEW: Store selected rows for each recipient
     }
     
     for key, value in defaults.items():
@@ -44,13 +49,13 @@ def initialize_session_state():
 
 
 # ========================
-# EMAIL SETTINGS UI
+# EMAIL SETTINGS UI - IMPROVED
 # ========================
 
 def render_email_settings() -> Dict:
     """
-    Render email settings section
-    Returns: Dict with notification_type, weeks_ahead, date_type
+    Render email settings section with buying legal entity filter
+    Returns: Dict with notification_type, weeks_ahead, date_type, legal_entities
     """
     st.subheader("⚙️ Email Settings")
     
@@ -100,11 +105,68 @@ def render_email_settings() -> Dict:
         )
         st.session_state.date_type = date_type
     
+    # NEW: Buying Legal Entity Filter
+    legal_entities = render_legal_entity_filter()
+    
     return {
         'notification_type': notification_type,
         'weeks_ahead': weeks_ahead or st.session_state.get('weeks_ahead', 4),
-        'date_type': date_type or st.session_state.get('date_type', 'ETD')
+        'date_type': date_type or st.session_state.get('date_type', 'ETD'),
+        'legal_entities': legal_entities
     }
+
+
+def render_legal_entity_filter() -> Optional[List[str]]:
+    """
+    NEW FUNCTION: Render legal entity filter
+    Returns: List of selected entities or None for all
+    """
+    st.markdown("---")
+    st.markdown("**🏢 Legal Entity Filter**")
+    
+    # Get available entities from database
+    from utils.email_notification.data_queries import EmailNotificationQueries
+    queries = EmailNotificationQueries()
+    entities_df = queries.get_legal_entities()
+    
+    if entities_df.empty:
+        st.warning("⚠️ No buying legal entities found")
+        return None
+    
+    entity_options = ['All Entities'] + entities_df['legal_entity'].tolist()
+    
+    # Filter selection
+    filter_mode = st.radio(
+        "Select Filter Mode",
+        ["All Entities", "Specific Entities"],
+        horizontal=True,
+        key="entity_filter_mode"
+    )
+    
+    if filter_mode == "All Entities":
+        st.info(f"📊 Including all {len(entities_df)} legal entities")
+        return None  # None means all entities
+    else:
+        selected_entities = st.multiselect(
+            "Select Legal Entities",
+            options=entities_df['legal_entity'].tolist(),
+            default=st.session_state.get('legal_entities', []),
+            key="entity_multiselect"
+        )
+        
+        if selected_entities:
+            st.session_state.legal_entities = selected_entities
+            st.success(f"✅ Selected {len(selected_entities)} entit{'y' if len(selected_entities) == 1 else 'ies'}")
+            
+            # Show summary of selected entities
+            with st.expander("📋 Selected Entities"):
+                for entity in selected_entities:
+                    st.text(f"  • {entity}")
+            
+            return selected_entities
+        else:
+            st.warning("⚠️ Please select at least one entity")
+            return []
 
 
 def render_recipient_type_selector(notification_type: str) -> str:
@@ -223,18 +285,16 @@ def render_vendor_selector(vendors_df: pd.DataFrame) -> Tuple[List[str], List[Di
             "Choose vendors",
             options=vendors_df['vendor_name'].unique().tolist(),
             default=st.session_state.get('selected_vendors', []),
-            format_func=lambda x: f"{x} ({len(vendors_df[vendors_df['vendor_name']==x])} contacts)",
-            key="vendor_names_selector"
+            key="vendor_selector"
         )
     
     st.session_state.selected_vendors = selected_vendor_names
     
-    # Step 2: Select contacts for chosen vendors
     selected_contacts = []
     
+    # Step 2: Select contacts for selected vendors
     if selected_vendor_names:
         st.markdown("**Step 2: Select Contacts**")
-        
         contacts_df = vendors_df[vendors_df['vendor_name'].isin(selected_vendor_names)]
         
         st.info(f"📧 Found {len(contacts_df)} contact(s) from {len(selected_vendor_names)} vendor(s)")
@@ -367,13 +427,228 @@ def render_cc_configuration(recipients: List[Dict], recipient_type: str) -> Tupl
 
 
 # ========================
-# PREVIEW & SUMMARY UI
+# DATA PREVIEW UI - NEW IMPROVED VERSION
+# ========================
+
+def render_data_preview_with_selection(
+    queries,
+    notification_type: str,
+    recipients: List[Dict],
+    settings: Dict,
+    recipient_type: str
+):
+    """
+    NEW FUNCTION: Render data preview with row selection capability
+    Shows actual PO data that will be sent and allows users to deselect rows
+    """
+    st.subheader("📊 Data Preview & Selection")
+    
+    if not recipients:
+        st.warning("⚠️ No recipients selected")
+        return
+    
+    st.info("💡 Preview the data that will be sent to each recipient. Uncheck rows you don't want to include.")
+    
+    # Fetch and preview data for each recipient
+    for idx, recipient in enumerate(recipients):
+        with st.expander(
+            f"📧 {recipient['name']} ({recipient['email']})",
+            expanded=(idx == 0)  # Expand first recipient by default
+        ):
+            # Fetch data based on notification type
+            if notification_type == "📅 PO Schedule":
+                df = fetch_preview_data_po_schedule(
+                    queries, recipient, settings, recipient_type
+                )
+            elif notification_type == "🚨 Critical Alerts":
+                df = fetch_preview_data_critical_alerts(
+                    queries, recipient, settings, recipient_type
+                )
+            elif notification_type == "📦 Pending Stock-in":
+                df = fetch_preview_data_pending_stockin(
+                    queries, recipient, settings
+                )
+            else:
+                df = pd.DataFrame()
+            
+            if df is not None and not df.empty:
+                # Store preview data in session state
+                recipient_key = f"{recipient['email']}_{notification_type}"
+                st.session_state.preview_data[recipient_key] = df
+                
+                # Show summary metrics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Rows", len(df))
+                with col2:
+                    if 'outstanding_arrival_amount_usd' in df.columns:
+                        st.metric("Total Value", f"${df['outstanding_arrival_amount_usd'].sum():,.0f}")
+                with col3:
+                    unique_pos = df['po_number'].nunique() if 'po_number' in df.columns else 0
+                    st.metric("Unique POs", unique_pos)
+                
+                # Data selection interface
+                st.markdown("**Select rows to include in email:**")
+                
+                # Initialize selected rows if not exists
+                if recipient_key not in st.session_state.selected_rows:
+                    st.session_state.selected_rows[recipient_key] = list(range(len(df)))
+                
+                # Select/Deselect all for this recipient
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button(f"✅ Select All", key=f"select_all_{recipient_key}"):
+                        st.session_state.selected_rows[recipient_key] = list(range(len(df)))
+                        st.rerun()
+                with col_b:
+                    if st.button(f"❌ Deselect All", key=f"deselect_all_{recipient_key}"):
+                        st.session_state.selected_rows[recipient_key] = []
+                        st.rerun()
+                
+                # Display editable dataframe with selection
+                display_df = df.copy()
+                
+                # Add selection column
+                display_df.insert(0, '✓', False)
+                for idx_row in st.session_state.selected_rows[recipient_key]:
+                    if idx_row < len(display_df):
+                        display_df.loc[idx_row, '✓'] = True
+                
+                # Show only key columns for preview
+                preview_columns = get_preview_columns(notification_type, display_df.columns)
+                
+                # Use data editor for row selection
+                edited_df = st.data_editor(
+                    display_df[['✓'] + preview_columns],
+                    hide_index=False,
+                    use_container_width=True,
+                    disabled=[col for col in preview_columns],  # Only checkbox is editable
+                    key=f"data_editor_{recipient_key}"
+                )
+                
+                # Update selected rows based on checkbox
+                st.session_state.selected_rows[recipient_key] = [
+                    i for i in range(len(edited_df)) if edited_df.loc[i, '✓']
+                ]
+                
+                selected_count = len(st.session_state.selected_rows[recipient_key])
+                if selected_count == 0:
+                    st.warning(f"⚠️ No rows selected - email will NOT be sent to {recipient['name']}")
+                else:
+                    st.success(f"✅ {selected_count} row(s) selected for email")
+            else:
+                st.warning(f"⚠️ No data found for {recipient['name']}")
+                st.session_state.selected_rows[f"{recipient['email']}_{notification_type}"] = []
+
+
+def fetch_preview_data_po_schedule(queries, recipient, settings, recipient_type):
+    """Fetch PO schedule data for preview"""
+    weeks_ahead = settings['weeks_ahead']
+    date_type = settings['date_type'].lower()
+    legal_entities = settings.get('legal_entities')
+    
+    if recipient_type == 'vendors':
+        df = queries.get_vendor_pos(
+            recipient['vendor_name'],
+            weeks_ahead,
+            date_type,
+            include_overdue=True,
+            legal_entities=legal_entities
+        )
+    elif recipient_type == 'custom':
+        df = queries.get_international_pos(
+            weeks_ahead,
+            date_type,
+            legal_entities=legal_entities
+        )
+    else:  # creators
+        df = queries.get_pos_by_creator(
+            recipient['email'],
+            weeks_ahead,
+            date_type,
+            legal_entities=legal_entities
+        )
+    
+    return df
+
+
+def fetch_preview_data_critical_alerts(queries, recipient, settings, recipient_type):
+    """Fetch critical alerts data for preview"""
+    date_type = settings['date_type'].lower()
+    legal_entities = settings.get('legal_entities')
+    
+    if recipient_type == 'creators':
+        overdue_df = queries.get_overdue_pos_by_creator(
+            recipient['email'],
+            date_type,
+            legal_entities=legal_entities
+        )
+        pending_can_df = queries.get_pending_cans_by_creator(
+            recipient['email'],
+            legal_entities=legal_entities
+        )
+        
+        # Combine both dataframes
+        if overdue_df is not None and not overdue_df.empty:
+            return overdue_df
+        elif pending_can_df is not None and not pending_can_df.empty:
+            return pending_can_df
+    
+    return pd.DataFrame()
+
+
+def fetch_preview_data_pending_stockin(queries, recipient, settings):
+    """Fetch pending stock-in data for preview"""
+    legal_entities = settings.get('legal_entities')
+    
+    df = queries.get_pending_cans_by_creator(
+        recipient['email'],
+        legal_entities=legal_entities
+    )
+    
+    return df
+
+
+def get_preview_columns(notification_type: str, available_columns: List[str]) -> List[str]:
+    """Get relevant columns to display in preview based on notification type"""
+    
+    # Define key columns for each notification type (matching purchase_order_full_view schema)
+    if notification_type == "📅 PO Schedule":
+        key_cols = [
+            'po_number', 'vendor_name', 'legal_entity',
+            'etd', 'eta', 'pt_code', 'product_name',
+            'pending_standard_arrival_quantity', 'standard_uom',
+            'outstanding_arrival_amount_usd', 'status'
+        ]
+    elif notification_type == "🚨 Critical Alerts":
+        key_cols = [
+            'po_number', 'vendor_name', 'legal_entity',
+            'etd', 'eta', 'pt_code',
+            'pending_standard_arrival_quantity',
+            'outstanding_arrival_amount_usd'
+        ]
+    elif notification_type == "📦 Pending Stock-in":
+        key_cols = [
+            'arrival_note_number', 'po_number', 'vendor_name',
+            'legal_entity', 'pt_code',
+            'pending_quantity', 'pending_value_usd',
+            'days_since_arrival', 'arrival_date'
+        ]
+    else:
+        key_cols = []
+    
+    # Return only columns that exist in the dataframe
+    return [col for col in key_cols if col in available_columns]
+
+
+# ========================
+# EMAIL PREVIEW & SUMMARY UI
 # ========================
 
 def render_email_preview(notification_type: str, recipients: List[Dict], 
                         settings: Dict, cc_info: Dict):
-    """Render email preview and summary"""
-    st.subheader("📧 Email Preview")
+    """Render email preview and summary - SIMPLIFIED VERSION (old preview)"""
+    st.subheader("📧 Email Summary")
     
     if not recipients:
         st.warning("⚠️ No recipients selected")
@@ -397,7 +672,7 @@ def render_email_preview(notification_type: str, recipients: List[Dict],
         st.metric("Total Emails", len(recipients))
     
     # Email details
-    with st.expander("📋 Email Details", expanded=True):
+    with st.expander("📋 Email Details"):
         st.markdown(f"**Type:** {notification_type}")
         
         if settings.get('weeks_ahead'):
@@ -405,6 +680,11 @@ def render_email_preview(notification_type: str, recipients: List[Dict],
         
         if settings.get('date_type'):
             st.markdown(f"**Date Type:** {settings['date_type']}")
+        
+        if settings.get('legal_entities'):
+            st.markdown(f"**Legal Entities:** {', '.join(settings['legal_entities'])}")
+        else:
+            st.markdown(f"**Legal Entities:** All")
         
         st.markdown("**Recipients:**")
         for i, recipient in enumerate(recipients[:5], 1):
