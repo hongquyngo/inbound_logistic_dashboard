@@ -236,50 +236,76 @@ class EmailTemplates:
                     </p>
                 """
             
-            # Upcoming POs section
+            # Upcoming POs section - GROUP BY WEEK
             if not upcoming_pos.empty:
-                upcoming_value = upcoming_pos['outstanding_arrival_amount_usd'].sum()
-                
                 html += f"""
                     <div class="upcoming-section">
                         <div class="section-header upcoming-header">
-                            📅 UPCOMING DELIVERIES - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} ({upcoming_count} POs, ${upcoming_value:,.0f})
+                            📅 UPCOMING DELIVERIES - Next {weeks_ahead} Week{'s' if weeks_ahead > 1 else ''} ({upcoming_count} POs)
+                        </div>
+                """
+                
+                # Add week column
+                upcoming_pos['week'] = pd.to_datetime(upcoming_pos[date_type]).dt.to_period('W')
+                upcoming_pos['week_start'] = upcoming_pos['week'].dt.start_time
+                upcoming_pos['week_end'] = upcoming_pos['week'].dt.end_time
+                
+                # Sort by date
+                upcoming_sorted = upcoming_pos.sort_values(date_type)
+                
+                # Group by week
+                for week_period, week_df in upcoming_sorted.groupby('week', sort=True):
+                    week_start = week_df['week_start'].iloc[0]
+                    week_end = week_df['week_end'].iloc[0]
+                    
+                    # Calculate week metrics
+                    week_po_count = week_df['po_number'].nunique()
+                    week_value = week_df['outstanding_arrival_amount_usd'].sum()
+                    week_qty = week_df['pending_standard_arrival_quantity'].sum()
+                    
+                    # Week number
+                    week_num = week_start.isocalendar()[1]
+                    
+                    html += f"""
+                        <div style="background-color: #e8f5e9; padding: 10px 15px; margin: 20px 0 10px 0; border-radius: 5px; border-left: 4px solid #4caf50;">
+                            <strong>Week {week_num} ({week_start.strftime('%b %d')} - {week_end.strftime('%b %d, %Y')})</strong>
+                            <span style="margin-left: 20px; color: #2e7d32;">
+                                {week_po_count} POs | ${week_value/1000:.0f}K | {week_qty:,.0f} units
+                            </span>
                         </div>
                         <table>
                             <tr>
                                 <th>{date_type_upper}</th>
-                                <th>Days Until {date_type_upper}</th>
                                 <th>PO Number</th>
+                                <th>Vendor</th>
                                 <th>PT Code</th>
                                 <th>Product</th>
-                                <th>Outstanding Qty</th>
+                                <th>Qty</th>
                                 <th>Value (USD)</th>
-                                <th>Trade Terms</th>
+                                <th>Status</th>
                             </tr>
-                """
-                
-                # Sort by date (nearest first)
-                upcoming_sorted = upcoming_pos.sort_values(date_type)
-                
-                for _, row in upcoming_sorted.iterrows():
-                    days_until = (row[date_type].date() - today).days
+                    """
                     
-                    html += f"""
-                        <tr>
-                            <td>{row[date_type].strftime('%b %d, %Y')}</td>
-                            <td>{days_until} days</td>
-                            <td>{row['po_number']}</td>
-                            <td>{row.get('pt_code', 'N/A')}</td>
-                            <td>{row.get('product_name', 'N/A')}</td>
-                            <td>{row.get('pending_standard_arrival_quantity', 0):,.0f}</td>
-                            <td>${row.get('outstanding_arrival_amount_usd', 0):,.0f}</td>
-                            <td>{row.get('trade_term', 'N/A')}</td>
-                        </tr>
+                    for _, row in week_df.iterrows():
+                        html += f"""
+                            <tr>
+                                <td>{row[date_type].strftime('%b %d')}</td>
+                                <td>{row['po_number']}</td>
+                                <td>{row.get('vendor_name', 'N/A')}</td>
+                                <td>{row.get('pt_code', 'N/A')}</td>
+                                <td>{row.get('product_name', 'N/A')}</td>
+                                <td>{row.get('pending_standard_arrival_quantity', 0):,.0f}</td>
+                                <td>${row.get('outstanding_arrival_amount_usd', 0):,.0f}</td>
+                                <td>{row.get('status', 'Pending')}</td>
+                            </tr>
+                        """
+                    
+                    html += """
+                        </table>
                     """
                 
                 html += """
-                    </table>
-                </div>
+                    </div>
                 """
             
             # Add calendar links if there are upcoming POs
@@ -819,12 +845,9 @@ class EmailTemplates:
                 </div>
             """
             
-            # International POs section
+            # International POs section - GROUP BY WEEK
             if po_df is not None and not po_df.empty:
                 po_df[date_type] = pd.to_datetime(po_df[date_type])
-                
-                # Group by country
-                countries = po_df.groupby('vendor_country_name')
                 
                 html += f"""
                     <div class="section-header upcoming-header">
@@ -832,46 +855,77 @@ class EmailTemplates:
                     </div>
                 """
                 
-                for country, country_df in countries:
-                    country_value = country_df['outstanding_arrival_amount_usd'].sum()
-                    country_po_count = country_df['po_number'].nunique()
+                # Add week column
+                po_df['week'] = po_df[date_type].dt.to_period('W')
+                po_df['week_start'] = po_df['week'].dt.start_time
+                po_df['week_end'] = po_df['week'].dt.end_time
+                
+                # Sort by date
+                po_sorted = po_df.sort_values(date_type)
+                
+                # Group by week
+                for week_period, week_df in po_sorted.groupby('week', sort=True):
+                    week_start = week_df['week_start'].iloc[0]
+                    week_end = week_df['week_end'].iloc[0]
+                    
+                    # Calculate week metrics
+                    week_po_count = week_df['po_number'].nunique()
+                    week_value = week_df['outstanding_arrival_amount_usd'].sum()
+                    week_countries = week_df['vendor_country_name'].nunique()
+                    
+                    # Week number
+                    week_num = week_start.isocalendar()[1]
                     
                     html += f"""
-                        <h3 style="color: #1976d2; margin: 20px 0 10px 0;">
-                            🌍 {country} ({country_po_count} POs, ${country_value:,.0f})
-                        </h3>
-                        <table>
-                            <tr>
-                                <th>{date_type_upper}</th>
-                                <th>PO Number</th>
-                                <th>Vendor</th>
-                                <th>Product</th>
-                                <th>HS Code</th>
-                                <th>Qty</th>
-                                <th>Value (USD)</th>
-                                <th>Trade Term</th>
-                            </tr>
+                        <div style="background-color: #e3f2fd; padding: 10px 15px; margin: 20px 0 10px 0; border-radius: 5px; border-left: 4px solid #1976d2;">
+                            <strong>Week {week_num} ({week_start.strftime('%b %d')} - {week_end.strftime('%b %d, %Y')})</strong>
+                            <span style="margin-left: 20px; color: #1565c0;">
+                                {week_po_count} POs | ${week_value/1000:.0f}K | {week_countries} Countries
+                            </span>
+                        </div>
                     """
                     
-                    country_sorted = country_df.sort_values(date_type)
-                    
-                    for _, row in country_sorted.iterrows():
+                    # Group by country within week
+                    for country, country_df in week_df.groupby('vendor_country_name'):
+                        country_value = country_df['outstanding_arrival_amount_usd'].sum()
+                        country_po_count = country_df['po_number'].nunique()
+                        
                         html += f"""
-                            <tr>
-                                <td>{row[date_type].strftime('%b %d, %Y')}</td>
-                                <td>{row['po_number']}</td>
-                                <td>{row.get('vendor_name', 'N/A')}</td>
-                                <td>{row.get('product_name', 'N/A')}</td>
-                                <td>{row.get('hs_code', 'N/A')}</td>
-                                <td>{row.get('pending_standard_arrival_quantity', 0):,.0f}</td>
-                                <td>${row.get('outstanding_arrival_amount_usd', 0):,.0f}</td>
-                                <td>{row.get('trade_term', 'N/A')}</td>
-                            </tr>
+                            <h4 style="color: #1976d2; margin: 15px 0 10px 0; font-size: 16px;">
+                                🌍 {country} ({country_po_count} POs, ${country_value:,.0f})
+                            </h4>
+                            <table>
+                                <tr>
+                                    <th>{date_type_upper}</th>
+                                    <th>PO Number</th>
+                                    <th>Vendor</th>
+                                    <th>Product</th>
+                                    <th>HS Code</th>
+                                    <th>Qty</th>
+                                    <th>Value (USD)</th>
+                                    <th>Trade Term</th>
+                                </tr>
                         """
-                    
-                    html += """
-                        </table>
-                    """
+                        
+                        country_sorted = country_df.sort_values(date_type)
+                        
+                        for _, row in country_sorted.iterrows():
+                            html += f"""
+                                <tr>
+                                    <td>{row[date_type].strftime('%b %d')}</td>
+                                    <td>{row['po_number']}</td>
+                                    <td>{row.get('vendor_name', 'N/A')}</td>
+                                    <td>{row.get('product_name', 'N/A')}</td>
+                                    <td>{row.get('hs_code', 'N/A')}</td>
+                                    <td>{row.get('pending_standard_arrival_quantity', 0):,.0f}</td>
+                                    <td>${row.get('outstanding_arrival_amount_usd', 0):,.0f}</td>
+                                    <td>{row.get('trade_term', 'N/A')}</td>
+                                </tr>
+                            """
+                        
+                        html += """
+                            </table>
+                        """
             
             # Pending CANs section
             if can_df is not None and not can_df.empty:
