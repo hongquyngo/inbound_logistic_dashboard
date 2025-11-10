@@ -174,6 +174,25 @@ def render_table_with_checkboxes(
     all_po_line_ids = set(original_df['po_line_id'].tolist())
     current_page_ids = set(original_df_page['po_line_id'].tolist())
     
+    # Callback for select all checkbox
+    def on_select_all_change():
+        if st.session_state.select_all_header:
+            st.session_state.selected_po_lines.update(all_po_line_ids)
+            st.session_state.select_all_checked = True
+        else:
+            st.session_state.selected_po_lines -= all_po_line_ids
+            st.session_state.select_all_checked = False
+    
+    # Callback for individual checkbox
+    def on_checkbox_change(line_id):
+        checkbox_key = f"checkbox_{line_id}_{st.session_state.page_number}"
+        if st.session_state[checkbox_key]:
+            st.session_state.selected_po_lines.add(line_id)
+        else:
+            st.session_state.selected_po_lines.discard(line_id)
+            # If any item is deselected, uncheck select_all
+            st.session_state.select_all_checked = False
+    
     with st.container():
         # Header row with "Select All" checkbox
         header_cols = st.columns([0.5] + [3] * len(display_df_page.columns))
@@ -182,23 +201,13 @@ def render_table_with_checkboxes(
             # Determine checkbox state: checked if ALL filtered results are selected
             all_selected = all_po_line_ids.issubset(st.session_state.selected_po_lines)
             
-            select_all = st.checkbox(
+            st.checkbox(
                 "",
                 value=all_selected,
                 key="select_all_header",
-                label_visibility="collapsed"
+                label_visibility="collapsed",
+                on_change=on_select_all_change
             )
-            
-            # Handle select all toggle - affects both filtered results AND current page display
-            if select_all != st.session_state.select_all_checked:
-                st.session_state.select_all_checked = select_all
-                if select_all:
-                    # Select ALL filtered results (not just current page)
-                    st.session_state.selected_po_lines.update(all_po_line_ids)
-                else:
-                    # Deselect ALL filtered results
-                    st.session_state.selected_po_lines -= all_po_line_ids
-                st.rerun()
         
         for idx, col_name in enumerate(display_df_page.columns):
             with header_cols[idx + 1]:
@@ -216,20 +225,16 @@ def render_table_with_checkboxes(
             # Checkbox column
             with row_cols[0]:
                 is_selected = po_line_id in st.session_state.selected_po_lines
-                
                 checkbox_key = f"checkbox_{po_line_id}_{st.session_state.page_number}"
                 
-                if st.checkbox(
+                st.checkbox(
                     "",
                     value=is_selected,
                     key=checkbox_key,
-                    label_visibility="collapsed"
-                ):
-                    if po_line_id not in st.session_state.selected_po_lines:
-                        st.session_state.selected_po_lines.add(po_line_id)
-                else:
-                    if po_line_id in st.session_state.selected_po_lines:
-                        st.session_state.selected_po_lines.discard(po_line_id)
+                    label_visibility="collapsed",
+                    on_change=on_checkbox_change,
+                    args=(po_line_id,)
+                )
             
             # Data columns
             for col_idx, (col_name, value) in enumerate(row.items()):
