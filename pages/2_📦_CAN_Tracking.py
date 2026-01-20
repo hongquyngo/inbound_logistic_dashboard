@@ -1,9 +1,12 @@
 # pages/2_📦_CAN_Tracking.py
 
 """
-Container Arrival Note (CAN) Tracking Page - Optimized with Fragments
-Enhanced with column selection, editing functionality, and email notifications
-Uses st.fragment for isolated reruns and better performance
+Container Arrival Note (CAN) Tracking Page - Batch Update Version
+Features:
+- Stage multiple CAN edits locally
+- Review all changes before applying
+- Batch database update and email notifications
+- Visual indicators for pending changes
 """
 
 import streamlit as st
@@ -21,6 +24,7 @@ from utils.can_tracking.data_service import CANDataService
 from utils.can_tracking.filters import render_filters, build_sql_params
 from utils.can_tracking.formatters import render_metrics, render_detail_list
 from utils.can_tracking.analytics import render_analytics_tab
+from utils.can_tracking.pending_changes import get_pending_manager
 
 # ============================================
 # TIMING HELPER
@@ -43,13 +47,6 @@ def _log_step(step_name: str):
         })
 
 _init_page_timing()
-
-from utils.auth import AuthManager
-from utils.can_tracking.constants import URGENT_DAYS_THRESHOLD, CRITICAL_DAYS_THRESHOLD
-from utils.can_tracking.data_service import CANDataService
-from utils.can_tracking.filters import render_filters, build_sql_params
-from utils.can_tracking.formatters import render_metrics, render_detail_list
-from utils.can_tracking.analytics import render_analytics_tab
 
 # ============================================
 # PAGE CONFIGURATION
@@ -79,11 +76,21 @@ if 'user_keycloak_id' not in st.session_state:
 # INITIALIZE SERVICES
 # ============================================
 can_service = CANDataService()
+pending_manager = get_pending_manager()
 
 # ============================================
 # HEADER
 # ============================================
 st.title("📦 Container Arrival Note (CAN) Tracking")
+
+# Show pending changes alert if any
+if pending_manager.has_pending_changes():
+    count = pending_manager.get_change_count()
+    st.warning(f"""
+    🟡 **{count} pending change{'s' if count > 1 else ''}** - Changes are staged locally and not yet saved to database.
+    Click **Apply Changes** at the bottom of the table to commit.
+    """)
+
 st.markdown("""
 Track container arrivals and manage stock-in operations with real-time status updates,
 financial analytics, and supply chain visibility.
@@ -117,19 +124,15 @@ def get_cached_can_data(query_parts: str, params_tuple: tuple) -> pd.DataFrame:
     params_dict = dict(params_tuple) if params_tuple else {}
     return can_service.load_can_data(query_parts, params_dict)
 
-# Check if we need to refresh data (after update)
-force_refresh = st.session_state.pop('_can_data_updated', False)
-
 _log_step("Before load CAN data")
 with st.spinner("📦 Loading CAN data..."):
     try:
         params_tuple = tuple(sorted(params.items())) if params else ()
         
-        # If data was updated, we need fresh data on next filter change
-        # But for now, use the locally updated DataFrame if available
-        if force_refresh and '_can_df_for_fragment' in st.session_state:
+        # Check if we have locally updated DataFrame
+        if '_can_df_for_fragment' in st.session_state:
             can_df = st.session_state['_can_df_for_fragment']
-            _log_step("Used cached local DataFrame")
+            _log_step("Used local DataFrame")
         else:
             can_df = get_cached_can_data(query_parts, params_tuple)
             _log_step("Loaded from database/cache")
@@ -152,12 +155,10 @@ if can_df is not None and not can_df.empty:
     tab1, tab2 = st.tabs(["📋 Detailed List", "📊 Analytics"])
     
     with tab1:
-        # Detail list with fragment - pagination and editing rerun only this section
         render_detail_list(can_df, data_service=can_service)
         _log_step("After render_detail_list")
     
     with tab2:
-        # Analytics with fragment - charts rerun independently
         render_analytics_tab(can_df)
         _log_step("After render_analytics_tab")
 
@@ -213,6 +214,20 @@ with st.sidebar:
                 del st.session_state[key]
         st.rerun()
     
+    # Pending changes section
+    if pending_manager.has_pending_changes():
+        st.markdown("---")
+        st.markdown("## 🟡 Pending Changes")
+        
+        changes = pending_manager.get_all_changes()
+        for an, change in changes.items():
+            with st.expander(f"📦 {an}", expanded=False):
+                st.caption(f"Product: {change.product_name}")
+                for c in change.get_changes_summary():
+                    st.text(f"• {c}")
+                if change.reason:
+                    st.caption(f"Reason: {change.reason}")
+    
     st.markdown("---")
     
     if can_df is not None and not can_df.empty:
@@ -252,9 +267,9 @@ with st.sidebar:
                 total = steps[-1]['elapsed']
                 st.markdown(f"**Total page load: {total:.3f}s**")
     
-    # Show last save timing if available
+    # Show last batch timing if available
     if '_timing_logs' in st.session_state and st.session_state._timing_logs:
-        with st.expander("Last Save Timing", expanded=False):
+        with st.expander("Last Batch Timing", expanded=False):
             for log in st.session_state._timing_logs:
                 color = "🟢" if log['elapsed'] < 0.5 else "🟡" if log['elapsed'] < 1.0 else "🔴"
                 extra = f" - {log['extra']}" if log['extra'] else ""

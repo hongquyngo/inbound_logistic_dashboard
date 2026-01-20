@@ -1,8 +1,8 @@
 # utils/can_tracking/formatters.py
 
 """
-Formatters Module for CAN Tracking - Optimized with Fragments
-Handles display formatting, pagination, and edit buttons with isolated reruns
+Formatters Module for CAN Tracking - Batch Update Version
+Handles display formatting, pagination, and visual indicators for pending changes
 """
 
 import streamlit as st
@@ -18,19 +18,17 @@ from utils.can_tracking.column_config import (
 from utils.can_tracking.can_editor import (
     render_edit_button,
     render_can_editor_modal,
+    render_floating_action_bar,
+    render_leave_warning_script,
     is_date_overdue,
     parse_date
 )
+from utils.can_tracking.pending_changes import get_pending_manager
 
 
 def render_metrics(can_df: pd.DataFrame, urgent_threshold: int = 7, critical_threshold: int = 14) -> None:
     """
     Render key metrics cards
-    
-    Args:
-        can_df: CAN dataframe
-        urgent_threshold: Days threshold for urgent items
-        critical_threshold: Days threshold for critical items
     """
     pending_df = can_df[can_df['pending_quantity'] > 0]
     
@@ -92,11 +90,6 @@ def render_metrics(can_df: pd.DataFrame, urgent_threshold: int = 7, critical_thr
 def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
     """
     Render detailed CAN list with column selection and edit functionality
-    This is the entry point - actual rendering happens in fragment
-    
-    Args:
-        can_df: CAN dataframe
-        data_service: CANDataService instance for updates
     """
     st.markdown("### 📋 Detailed CAN List")
     
@@ -104,7 +97,7 @@ def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
         st.info("No data to display")
         return
     
-    # Column selector outside fragment (changes require full data refresh anyway)
+    # Column selector
     selected_columns = render_column_selector()
     
     if not selected_columns:
@@ -118,6 +111,12 @@ def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
     
     # Render the fragment
     _render_detail_list_fragment()
+    
+    # Render floating action bar (outside fragment for visibility)
+    render_floating_action_bar()
+    
+    # Render leave warning script
+    render_leave_warning_script()
 
 
 @st.fragment
@@ -125,7 +124,6 @@ def _render_detail_list_fragment() -> None:
     """
     Fragment for detail list - reruns independently for pagination and editing
     """
-    # Retrieve data from session state
     can_df = st.session_state.get('_can_df_for_fragment')
     selected_columns = st.session_state.get('_can_selected_columns', [])
     data_service = st.session_state.get('_can_data_service')
@@ -134,27 +132,40 @@ def _render_detail_list_fragment() -> None:
         st.info("No data to display")
         return
     
-    # Summary info
+    # Summary info with pending changes count
+    pending_manager = get_pending_manager()
+    pending_count = pending_manager.get_change_count()
     overdue_count = count_overdue_rows(can_df)
-    col1, col2 = st.columns([3, 1])
+    
+    col1, col2, col3 = st.columns([2, 2, 2])
     with col1:
         st.caption(f"Showing {len(can_df):,} records")
     with col2:
         if overdue_count > 0:
             st.caption(f"⚠️ {overdue_count} overdue arrivals")
+    with col3:
+        if pending_count > 0:
+            st.caption(f"🟡 {pending_count} pending changes")
     
     # Prepare display dataframe
     display_df = prepare_display_dataframe(can_df, selected_columns)
     
-    # Render table with pagination (inside fragment)
+    # Render table with pagination
     render_table_with_actions(display_df, can_df, selected_columns, data_service)
     
-    # Editor modal (inside fragment - reruns only fragment when editing)
+    # Editor modal
     if data_service:
         render_can_editor_modal(data_service)
     
     st.markdown("---")
-    st.caption("**Legend:** ⚠️ Warning emoji on date cells = Overdue arrival (past today)")
+    
+    # Legend
+    st.caption("""
+    **Legend:** 
+    ⚠️ = Overdue arrival | 
+    🟡 = Has pending changes (not yet applied) | 
+    ⚡ = Value modified (staged)
+    """)
     
     # Download buttons
     _render_download_buttons(can_df, selected_columns)
@@ -191,13 +202,6 @@ def _render_download_buttons(can_df: pd.DataFrame, selected_columns: List[str]) 
 def prepare_display_dataframe(can_df: pd.DataFrame, selected_columns: List[str]) -> pd.DataFrame:
     """
     Prepare dataframe for display with selected columns and proper formatting
-    
-    Args:
-        can_df: Full CAN dataframe
-        selected_columns: List of columns to display
-        
-    Returns:
-        Formatted dataframe for display
     """
     existing_columns = [col for col in selected_columns if col in can_df.columns]
     display_df = can_df[existing_columns].copy()
@@ -226,15 +230,10 @@ def render_table_with_actions(
     data_service
 ) -> None:
     """
-    Render dataframe with action buttons and overdue highlighting
-    Uses st.dataframe for better performance instead of manual row rendering
-    
-    Args:
-        display_df: Formatted dataframe for display
-        original_df: Original dataframe with all data
-        selected_columns: List of selected columns
-        data_service: CANDataService instance
+    Render dataframe with action buttons, overdue highlighting, and pending indicators
     """
+    pending_manager = get_pending_manager()
+    
     # Initialize pagination
     if 'can_page_number' not in st.session_state:
         st.session_state.can_page_number = 1
@@ -243,19 +242,17 @@ def render_table_with_actions(
     total_rows = len(display_df)
     total_pages = max(1, (total_rows + rows_per_page - 1) // rows_per_page)
     
-    # Ensure page number is valid
     if st.session_state.can_page_number > total_pages:
         st.session_state.can_page_number = total_pages
     
     start_idx = (st.session_state.can_page_number - 1) * rows_per_page
     end_idx = min(start_idx + rows_per_page, total_rows)
     
-    # Get page data
     display_df_page = display_df.iloc[start_idx:end_idx]
     original_df_page = original_df.iloc[start_idx:end_idx]
     
-    # Render table with edit buttons
-    _render_table_rows(display_df_page, original_df_page, data_service)
+    # Render table rows
+    _render_table_rows(display_df_page, original_df_page, data_service, pending_manager)
     
     # Pagination controls
     _render_pagination_controls(total_pages)
@@ -264,9 +261,11 @@ def render_table_with_actions(
 def _render_table_rows(
     display_df_page: pd.DataFrame,
     original_df_page: pd.DataFrame,
-    data_service
+    data_service,
+    pending_manager
 ) -> None:
-    """Render table rows with action buttons"""
+    """Render table rows with action buttons and visual indicators"""
+    
     with st.container():
         # Header row
         header_cols = st.columns([1] + [3] * len(display_df_page.columns))
@@ -283,13 +282,18 @@ def _render_table_rows(
         # Data rows
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
             original_row = original_df_page.iloc[idx]
+            arrival_note_number = original_row['arrival_note_number']
             
+            # Check if this row has pending changes
+            has_pending = pending_manager.has_change_for(arrival_note_number)
+            pending_change = pending_manager.get_change(arrival_note_number) if has_pending else None
+            
+            # Row styling based on pending status
             row_cols = st.columns([1] + [3] * len(row))
             
             # Action button
             with row_cols[0]:
                 can_line_id = original_row['can_line_id']
-                arrival_note_number = original_row['arrival_note_number']
                 render_edit_button(
                     can_line_id=can_line_id,
                     arrival_note_number=arrival_note_number,
@@ -299,27 +303,46 @@ def _render_table_rows(
             # Data cells
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
-                    is_date_col_overdue = False
-                    
-                    if col_name == 'Arrival Date':
-                        if 'arrival_date' in original_row:
-                            is_date_col_overdue = is_date_overdue(original_row['arrival_date'])
-                    
                     display_value = str(value) if pd.notna(value) else ""
+                    
+                    # Check for overdue
+                    is_overdue = False
+                    if col_name == 'Arrival Date' and 'arrival_date' in original_row:
+                        is_overdue = is_date_overdue(original_row['arrival_date'])
+                    
+                    # Check if this cell was modified in pending change
+                    is_modified = False
+                    if has_pending and pending_change:
+                        if col_name == 'Arrival Date' and pending_change.has_date_change:
+                            is_modified = True
+                            # Show new value from pending change
+                            display_value = pending_change._format_date(pending_change.new_arrival_date)
+                        elif col_name == 'CAN Status' and pending_change.has_status_change:
+                            is_modified = True
+                            display_value = pending_change._format_status(pending_change.new_status)
+                        elif col_name == 'Warehouse' and pending_change.has_warehouse_change:
+                            is_modified = True
+                            display_value = pending_change.new_warehouse_name
+                    
+                    # Truncate long values
                     if len(display_value) > 50:
                         display_value = display_value[:47] + "..."
                     
-                    if is_date_col_overdue:
-                        display_value = f"⚠️ {display_value}"
+                    # Add indicators
+                    prefix = ""
+                    if is_overdue:
+                        prefix += "⚠️ "
+                    if is_modified:
+                        prefix += "⚡"
                     
-                    st.text(display_value)
+                    st.text(f"{prefix}{display_value}")
             
             if idx < len(display_df_page) - 1:
                 st.markdown("")
 
 
 def _render_pagination_controls(total_pages: int) -> None:
-    """Render pagination controls - rerun only fragment"""
+    """Render pagination controls"""
     st.divider()
     col1, col2, col3 = st.columns([2, 1, 2])
     
@@ -327,7 +350,7 @@ def _render_pagination_controls(total_pages: int) -> None:
         if st.session_state.can_page_number > 1:
             if st.button("← Previous", use_container_width=True, key="can_prev_frag"):
                 st.session_state.can_page_number -= 1
-                st.rerun(scope="fragment")  # Only rerun this fragment
+                st.rerun(scope="fragment")
     
     with col2:
         st.markdown(
@@ -339,7 +362,7 @@ def _render_pagination_controls(total_pages: int) -> None:
         if st.session_state.can_page_number < total_pages:
             if st.button("Next →", use_container_width=True, key="can_next_frag"):
                 st.session_state.can_page_number += 1
-                st.rerun(scope="fragment")  # Only rerun this fragment
+                st.rerun(scope="fragment")
 
 
 def row_has_overdue_dates(row: pd.Series) -> bool:
@@ -354,7 +377,6 @@ def count_overdue_rows(df: pd.DataFrame) -> int:
     if df.empty or 'arrival_date' not in df.columns:
         return 0
     
-    # Vectorized operation instead of row-by-row iteration
     today = date.today()
     arrival_dates = pd.to_datetime(df['arrival_date'], errors='coerce').dt.date
     return (arrival_dates < today).sum()

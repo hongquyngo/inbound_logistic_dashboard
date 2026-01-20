@@ -3,6 +3,7 @@
 """
 Email Notification Service for CAN Tracking
 Handles email notifications for CAN updates (arrival date, status, warehouse changes)
+Supports both single and batch update notifications
 """
 
 import logging
@@ -10,13 +11,16 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from utils.config import EMAIL_SENDER, EMAIL_PASSWORD
 from sqlalchemy import text
 import pytz
 
 # Import shared constants
 from utils.can_tracking.constants import STATUS_DISPLAY
+
+if TYPE_CHECKING:
+    from utils.can_tracking.pending_changes import CANChange
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,292 @@ class CANEmailService:
             logger.error(f"Error getting creator email: {e}", exc_info=True)
             return None
     
+    # ========================================================================
+    # BATCH UPDATE NOTIFICATION (NEW)
+    # ========================================================================
+    
+    def send_batch_update_notification(
+        self,
+        creator_email: str,
+        changes: List['CANChange'],
+        modifier_email: str,
+        modifier_name: str
+    ) -> bool:
+        """
+        Send consolidated email notification for multiple CAN updates to a single creator
+        
+        Args:
+            creator_email: Email of the CAN creator
+            changes: List of CANChange objects for this creator's CANs
+            modifier_email: Email of the person making changes
+            modifier_name: Name of the person making changes
+            
+        Returns:
+            bool: True if email sent successfully
+        """
+        try:
+            if not changes:
+                return False
+            
+            # Build recipient list
+            to_emails = [creator_email]
+            if modifier_email and modifier_email != creator_email:
+                to_emails.append(modifier_email)
+            
+            to_emails = list(set(to_emails))
+            cc_emails = ["can.update@prostech.vn"]
+            
+            # Get current time with timezone
+            now_vn = datetime.now(VIETNAM_TZ)
+            
+            # Build subject
+            count = len(changes)
+            if count == 1:
+                subject = f"📦 CAN Updated - {changes[0].arrival_note_number}"
+            else:
+                subject = f"📦 CAN Batch Update - {count} items updated"
+            
+            # Build email body
+            body = self._build_batch_email_body(
+                changes=changes,
+                modifier_name=modifier_name,
+                update_time=now_vn
+            )
+            
+            # Send email
+            success = self._send_email(
+                to_emails=to_emails,
+                cc_emails=cc_emails,
+                subject=subject,
+                body=body
+            )
+            
+            if success:
+                logger.info(f"Batch email sent to {creator_email} for {count} CANs")
+            else:
+                logger.error(f"Failed to send batch email to {creator_email}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error sending batch notification: {e}", exc_info=True)
+            return False
+    
+    def _build_batch_email_body(
+        self,
+        changes: List['CANChange'],
+        modifier_name: str,
+        update_time: datetime
+    ) -> str:
+        """Build HTML email body for batch updates"""
+        
+        def format_date(d):
+            if not d:
+                return "Not set"
+            if isinstance(d, str):
+                try:
+                    d = datetime.strptime(d, '%Y-%m-%d')
+                except:
+                    return d
+            return d.strftime("%d %b %Y") if hasattr(d, 'strftime') else str(d)
+        
+        def format_datetime_with_tz(dt):
+            return dt.strftime("%d %b %Y %H:%M:%S %Z")
+        
+        def format_status(status):
+            return STATUS_DISPLAY.get(status, status)
+        
+        def format_diff(diff):
+            if diff is None:
+                return ""
+            if diff > 0:
+                return f'<span style="color: #e74c3c;">(+{diff} days)</span>'
+            elif diff < 0:
+                return f'<span style="color: #27ae60;">({diff} days)</span>'
+            return ""
+        
+        # Build changes list HTML
+        changes_html = ""
+        for i, change in enumerate(changes, 1):
+            change_items = ""
+            
+            if change.has_date_change:
+                diff = change.date_diff_days
+                change_items += f"""
+                <li>Date: {format_date(change.original_arrival_date)} → 
+                    <strong>{format_date(change.new_arrival_date)}</strong> 
+                    {format_diff(diff)}</li>
+                """
+            
+            if change.has_status_change:
+                change_items += f"""
+                <li>Status: {format_status(change.original_status)} → 
+                    <strong>{format_status(change.new_status)}</strong></li>
+                """
+            
+            if change.has_warehouse_change:
+                change_items += f"""
+                <li>Warehouse: {change.original_warehouse_name} → 
+                    <strong>{change.new_warehouse_name}</strong></li>
+                """
+            
+            reason_html = f'<p class="reason">Reason: {change.reason}</p>' if change.reason else ''
+            
+            changes_html += f"""
+            <div class="can-item">
+                <h3>{i}. {change.arrival_note_number}</h3>
+                <p class="product">{change.product_name}</p>
+                <p class="vendor">Vendor: {change.vendor_name}</p>
+                <ul class="changes-list">
+                    {change_items}
+                </ul>
+                {reason_html}
+            </div>
+            """
+        
+        count = len(changes)
+        
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 0;
+        }}
+        .container {{
+            max-width: 650px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f9f9f9;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #2c3e50 0%, #3498db 100%);
+            color: white;
+            padding: 25px;
+            text-align: center;
+            border-radius: 8px 8px 0 0;
+        }}
+        .header h1 {{
+            margin: 0;
+            font-size: 24px;
+        }}
+        .header .count {{
+            background: rgba(255,255,255,0.2);
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-top: 10px;
+            font-size: 14px;
+        }}
+        .content {{
+            background-color: white;
+            padding: 30px;
+            border-radius: 0 0 8px 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }}
+        .summary {{
+            background-color: #e8f4f8;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            border-left: 4px solid #3498db;
+        }}
+        .can-item {{
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background-color: #fafafa;
+        }}
+        .can-item h3 {{
+            margin: 0 0 10px 0;
+            color: #2c3e50;
+            font-size: 16px;
+        }}
+        .can-item .product {{
+            font-weight: 500;
+            color: #555;
+            margin: 5px 0;
+        }}
+        .can-item .vendor {{
+            color: #777;
+            font-size: 13px;
+            margin: 5px 0;
+        }}
+        .changes-list {{
+            margin: 10px 0;
+            padding-left: 20px;
+        }}
+        .changes-list li {{
+            margin: 5px 0;
+            color: #333;
+        }}
+        .reason {{
+            background-color: #fff3cd;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #856404;
+            margin-top: 10px;
+        }}
+        .footer {{
+            margin-top: 25px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+            font-size: 12px;
+            color: #7f8c8d;
+            text-align: center;
+        }}
+        .modifier-info {{
+            background-color: #f0f0f0;
+            padding: 12px;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-size: 13px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📦 Container Arrival Note Update</h1>
+            <div class="count">{count} CAN{'s' if count > 1 else ''} Updated</div>
+        </div>
+        
+        <div class="content">
+            <div class="summary">
+                <strong>{count}</strong> Container Arrival Note{'s have' if count > 1 else ' has'} been updated.
+                Please review the changes below.
+            </div>
+            
+            {changes_html}
+            
+            <div class="modifier-info">
+                <strong>Updated by:</strong> {modifier_name}<br>
+                <strong>Update time:</strong> {format_datetime_with_tz(update_time)}
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>This is an automated notification from CAN Tracking System.</p>
+            <p>© {date.today().year} Prostech Vietnam. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        return html
+    
+    # ========================================================================
+    # SINGLE UPDATE NOTIFICATION (ORIGINAL)
+    # ========================================================================
+    
     def send_can_update_notification(
         self,
         can_line_id: int,
@@ -76,7 +366,7 @@ class CANEmailService:
         reason: Optional[str] = None
     ) -> bool:
         """
-        Send email notification when CAN is updated
+        Send email notification when a single CAN is updated
         
         Returns:
             bool: True if email sent successfully
@@ -92,14 +382,12 @@ class CANEmailService:
             if modifier_email:
                 to_emails.append(modifier_email)
             
-            # Remove duplicates
             to_emails = list(set(to_emails))
             
             if not to_emails:
                 logger.warning(f"No recipient emails found for CAN {arrival_note_number}")
                 return False
             
-            # CC address
             cc_emails = ["can.update@prostech.vn"]
             
             # Calculate date difference
@@ -113,10 +401,9 @@ class CANEmailService:
             # Build email
             subject = f"📦 CAN Updated - {arrival_note_number}"
             
-            # Get current time with timezone
             now_vn = datetime.now(VIETNAM_TZ)
             
-            body = self._build_email_body(
+            body = self._build_single_email_body(
                 arrival_note_number=arrival_note_number,
                 can_line_id=can_line_id,
                 product_name=product_name,
@@ -136,7 +423,6 @@ class CANEmailService:
                 update_time=now_vn
             )
             
-            # Send email
             success = self._send_email(
                 to_emails=to_emails,
                 cc_emails=cc_emails,
@@ -155,7 +441,7 @@ class CANEmailService:
             logger.error(f"Error sending CAN update notification: {e}", exc_info=True)
             return False
     
-    def _build_email_body(
+    def _build_single_email_body(
         self,
         arrival_note_number: str,
         can_line_id: int,
@@ -175,7 +461,7 @@ class CANEmailService:
         reason: Optional[str],
         update_time: datetime
     ) -> str:
-        """Build HTML email body"""
+        """Build HTML email body for single update"""
         
         def format_date(d):
             return d.strftime("%d %b %Y") if d else "Not set"
