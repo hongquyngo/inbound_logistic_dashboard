@@ -1,15 +1,13 @@
 # utils/can_tracking/analytics.py
 
 """
-CAN Analytics - Metrics & Visualizations
+CAN Analytics - Metrics & Visualizations with Fragment Support
 
 Handles all calculations and chart generation for CAN tracking analytics.
-Provides metrics calculation and Plotly chart generation functions.
-
-This module is pure data transformation - takes DataFrames as input,
-returns metrics or Plotly figures as output.
+Charts are wrapped in fragments for isolated rendering.
 """
 
+import streamlit as st
 import pandas as pd
 import plotly.express as px
 import logging
@@ -89,6 +87,86 @@ def calculate_metrics(df, show_pending_only, urgent_threshold=7, critical_thresh
             'unique_cans': 0,
             'completed_cans': 0
         }
+
+
+# ============================================================================
+# FRAGMENT-WRAPPED ANALYTICS RENDERER
+# ============================================================================
+
+def render_analytics_tab(can_df: pd.DataFrame) -> None:
+    """
+    Entry point for analytics tab - stores data and calls fragment
+    
+    Args:
+        can_df: CAN dataframe
+    """
+    st.subheader("📊 CAN Analytics & Trends")
+    
+    analytics_df = can_df[can_df['pending_quantity'] > 0]
+    
+    if analytics_df.empty:
+        st.info("ℹ️ No pending items to analyze with the selected filters")
+        return
+    
+    # Store data for fragment access
+    st.session_state['_analytics_df'] = analytics_df
+    
+    # Render analytics fragment
+    _render_analytics_fragment()
+
+
+@st.fragment
+def _render_analytics_fragment() -> None:
+    """
+    Fragment for analytics charts - renders independently
+    """
+    analytics_df = st.session_state.get('_analytics_df')
+    
+    if analytics_df is None or analytics_df.empty:
+        st.info("ℹ️ No pending items to analyze")
+        return
+    
+    # Row 1: Days Pending + Vendor Location
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("#### Days Pending Distribution")
+        fig1 = create_days_pending_chart(analytics_df)
+        if fig1:
+            st.plotly_chart(fig1, use_container_width=True, key="chart_days_pending")
+        else:
+            st.info("No data available for this chart")
+    
+    with col2:
+        st.markdown("#### Value by Vendor Location")
+        fig2 = create_vendor_location_chart(analytics_df)
+        if fig2:
+            st.plotly_chart(fig2, use_container_width=True, key="chart_vendor_location")
+        else:
+            st.info("No data available for this chart")
+    
+    st.markdown("---")
+    
+    # Row 2: Top Vendors
+    st.markdown("#### Top 10 Vendors by Pending Value")
+    fig3, vendor_table = create_vendor_analysis_chart(analytics_df)
+    if fig3:
+        st.plotly_chart(fig3, use_container_width=True, key="chart_vendor_analysis")
+        
+        if vendor_table is not None and not vendor_table.empty:
+            st.dataframe(vendor_table, use_container_width=True, hide_index=True)
+    else:
+        st.info("No vendor data available")
+    
+    st.markdown("---")
+    
+    # Row 3: Daily Trend
+    st.markdown("#### Daily Arrival Trend (Last 30 days)")
+    fig4 = create_daily_trend_chart(analytics_df)
+    if fig4:
+        st.plotly_chart(fig4, use_container_width=True, key="chart_daily_trend")
+    else:
+        st.info("No trend data available")
 
 
 # ============================================================================

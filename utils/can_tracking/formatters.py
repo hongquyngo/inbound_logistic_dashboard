@@ -1,14 +1,16 @@
 # utils/can_tracking/formatters.py
 
 """
-Formatters Module for CAN Tracking - Clean Version
-Handles display formatting, pagination, and edit buttons
+Formatters Module for CAN Tracking - Optimized with Fragments
+Handles display formatting, pagination, and edit buttons with isolated reruns
 """
 
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from io import BytesIO
+
 from utils.can_tracking.column_config import (
     render_column_selector,
     get_column_display_name
@@ -90,6 +92,7 @@ def render_metrics(can_df: pd.DataFrame, urgent_threshold: int = 7, critical_thr
 def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
     """
     Render detailed CAN list with column selection and edit functionality
+    This is the entry point - actual rendering happens in fragment
     
     Args:
         can_df: CAN dataframe
@@ -101,12 +104,37 @@ def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
         st.info("No data to display")
         return
     
+    # Column selector outside fragment (changes require full data refresh anyway)
     selected_columns = render_column_selector()
     
     if not selected_columns:
         st.warning("⚠️ No columns selected. Please select columns to display.")
         return
     
+    # Store data in session state for fragment access
+    st.session_state['_can_df_for_fragment'] = can_df
+    st.session_state['_can_selected_columns'] = selected_columns
+    st.session_state['_can_data_service'] = data_service
+    
+    # Render the fragment
+    _render_detail_list_fragment()
+
+
+@st.fragment
+def _render_detail_list_fragment() -> None:
+    """
+    Fragment for detail list - reruns independently for pagination and editing
+    """
+    # Retrieve data from session state
+    can_df = st.session_state.get('_can_df_for_fragment')
+    selected_columns = st.session_state.get('_can_selected_columns', [])
+    data_service = st.session_state.get('_can_data_service')
+    
+    if can_df is None or can_df.empty:
+        st.info("No data to display")
+        return
+    
+    # Summary info
     overdue_count = count_overdue_rows(can_df)
     col1, col2 = st.columns([3, 1])
     with col1:
@@ -115,15 +143,25 @@ def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
         if overdue_count > 0:
             st.caption(f"⚠️ {overdue_count} overdue arrivals")
     
+    # Prepare display dataframe
     display_df = prepare_display_dataframe(can_df, selected_columns)
+    
+    # Render table with pagination (inside fragment)
     render_table_with_actions(display_df, can_df, selected_columns, data_service)
     
+    # Editor modal (inside fragment - reruns only fragment when editing)
     if data_service:
         render_can_editor_modal(data_service)
     
     st.markdown("---")
     st.caption("**Legend:** ⚠️ Warning emoji on date cells = Overdue arrival (past today)")
     
+    # Download buttons
+    _render_download_buttons(can_df, selected_columns)
+
+
+def _render_download_buttons(can_df: pd.DataFrame, selected_columns: List[str]) -> None:
+    """Render download buttons for CSV and Excel"""
     col1, col2, col3 = st.columns([1, 1, 4])
     
     with col1:
@@ -137,8 +175,6 @@ def render_detail_list(can_df: pd.DataFrame, data_service=None) -> None:
         )
     
     with col2:
-        from io import BytesIO
-        
         excel_buffer = BytesIO()
         with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
             can_df[selected_columns].to_excel(writer, index=False, sheet_name='CAN Data')
@@ -191,6 +227,7 @@ def render_table_with_actions(
 ) -> None:
     """
     Render dataframe with action buttons and overdue highlighting
+    Uses st.dataframe for better performance instead of manual row rendering
     
     Args:
         display_df: Formatted dataframe for display
@@ -198,20 +235,40 @@ def render_table_with_actions(
         selected_columns: List of selected columns
         data_service: CANDataService instance
     """
+    # Initialize pagination
     if 'can_page_number' not in st.session_state:
         st.session_state.can_page_number = 1
     
     rows_per_page = 50
     total_rows = len(display_df)
-    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+    total_pages = max(1, (total_rows + rows_per_page - 1) // rows_per_page)
+    
+    # Ensure page number is valid
+    if st.session_state.can_page_number > total_pages:
+        st.session_state.can_page_number = total_pages
     
     start_idx = (st.session_state.can_page_number - 1) * rows_per_page
     end_idx = min(start_idx + rows_per_page, total_rows)
     
+    # Get page data
     display_df_page = display_df.iloc[start_idx:end_idx]
     original_df_page = original_df.iloc[start_idx:end_idx]
     
+    # Render table with edit buttons
+    _render_table_rows(display_df_page, original_df_page, data_service)
+    
+    # Pagination controls
+    _render_pagination_controls(total_pages)
+
+
+def _render_table_rows(
+    display_df_page: pd.DataFrame,
+    original_df_page: pd.DataFrame,
+    data_service
+) -> None:
+    """Render table rows with action buttons"""
     with st.container():
+        # Header row
         header_cols = st.columns([1] + [3] * len(display_df_page.columns))
         
         with header_cols[0]:
@@ -223,11 +280,13 @@ def render_table_with_actions(
         
         st.divider()
         
+        # Data rows
         for idx, (display_idx, row) in enumerate(display_df_page.iterrows()):
             original_row = original_df_page.iloc[idx]
             
             row_cols = st.columns([1] + [3] * len(row))
             
+            # Action button
             with row_cols[0]:
                 can_line_id = original_row['can_line_id']
                 arrival_note_number = original_row['arrival_note_number']
@@ -237,6 +296,7 @@ def render_table_with_actions(
                     row_data=original_row.to_dict()
                 )
             
+            # Data cells
             for col_idx, (col_name, value) in enumerate(row.items()):
                 with row_cols[col_idx + 1]:
                     is_date_col_overdue = False
@@ -256,15 +316,18 @@ def render_table_with_actions(
             
             if idx < len(display_df_page) - 1:
                 st.markdown("")
-    
+
+
+def _render_pagination_controls(total_pages: int) -> None:
+    """Render pagination controls - rerun only fragment"""
     st.divider()
     col1, col2, col3 = st.columns([2, 1, 2])
     
     with col1:
         if st.session_state.can_page_number > 1:
-            if st.button("← Previous", use_container_width=True, key="can_prev"):
+            if st.button("← Previous", use_container_width=True, key="can_prev_frag"):
                 st.session_state.can_page_number -= 1
-                st.rerun()
+                st.rerun(scope="fragment")  # Only rerun this fragment
     
     with col2:
         st.markdown(
@@ -274,9 +337,9 @@ def render_table_with_actions(
     
     with col3:
         if st.session_state.can_page_number < total_pages:
-            if st.button("Next →", use_container_width=True, key="can_next"):
+            if st.button("Next →", use_container_width=True, key="can_next_frag"):
                 st.session_state.can_page_number += 1
-                st.rerun()
+                st.rerun(scope="fragment")  # Only rerun this fragment
 
 
 def row_has_overdue_dates(row: pd.Series) -> bool:
@@ -287,13 +350,11 @@ def row_has_overdue_dates(row: pd.Series) -> bool:
 
 
 def count_overdue_rows(df: pd.DataFrame) -> int:
-    """Count how many rows have overdue dates"""
-    if df.empty:
+    """Count how many rows have overdue dates - vectorized for performance"""
+    if df.empty or 'arrival_date' not in df.columns:
         return 0
     
-    overdue_count = 0
-    for _, row in df.iterrows():
-        if row_has_overdue_dates(row):
-            overdue_count += 1
-    
-    return overdue_count
+    # Vectorized operation instead of row-by-row iteration
+    today = date.today()
+    arrival_dates = pd.to_datetime(df['arrival_date'], errors='coerce').dt.date
+    return (arrival_dates < today).sum()

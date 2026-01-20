@@ -1,8 +1,9 @@
 # pages/2_📦_CAN_Tracking.py
 
 """
-Container Arrival Note (CAN) Tracking Page - Clean Version
+Container Arrival Note (CAN) Tracking Page - Optimized with Fragments
 Enhanced with column selection, editing functionality, and email notifications
+Uses st.fragment for isolated reruns and better performance
 """
 
 import streamlit as st
@@ -10,6 +11,7 @@ from datetime import datetime
 import sys
 from pathlib import Path
 import pandas as pd
+import time
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -18,13 +20,36 @@ from utils.can_tracking.constants import URGENT_DAYS_THRESHOLD, CRITICAL_DAYS_TH
 from utils.can_tracking.data_service import CANDataService
 from utils.can_tracking.filters import render_filters, build_sql_params
 from utils.can_tracking.formatters import render_metrics, render_detail_list
-from utils.can_tracking.analytics import (
-    calculate_metrics,
-    create_days_pending_chart,
-    create_vendor_location_chart,
-    create_vendor_analysis_chart,
-    create_daily_trend_chart
-)
+from utils.can_tracking.analytics import render_analytics_tab
+
+# ============================================
+# TIMING HELPER
+# ============================================
+def _init_page_timing():
+    """Initialize page timing"""
+    if '_page_timing' not in st.session_state:
+        st.session_state._page_timing = {}
+    st.session_state._page_timing['page_start'] = time.time()
+    st.session_state._page_timing['steps'] = []
+
+def _log_step(step_name: str):
+    """Log a timing step"""
+    if '_page_timing' in st.session_state:
+        elapsed = time.time() - st.session_state._page_timing['page_start']
+        st.session_state._page_timing['steps'].append({
+            'step': step_name,
+            'elapsed': elapsed,
+            'timestamp': datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        })
+
+_init_page_timing()
+
+from utils.auth import AuthManager
+from utils.can_tracking.constants import URGENT_DAYS_THRESHOLD, CRITICAL_DAYS_THRESHOLD
+from utils.can_tracking.data_service import CANDataService
+from utils.can_tracking.filters import render_filters, build_sql_params
+from utils.can_tracking.formatters import render_metrics, render_detail_list
+from utils.can_tracking.analytics import render_analytics_tab
 
 # ============================================
 # PAGE CONFIGURATION
@@ -69,7 +94,9 @@ financial analytics, and supply chain visibility.
 # ============================================
 st.markdown("## 🔍 Filters")
 
+_log_step("Before get_filter_options")
 filter_options = can_service.get_filter_options()
+_log_step("After get_filter_options")
 
 if not filter_options:
     st.error("Failed to load filter options. Please refresh the page.")
@@ -84,16 +111,29 @@ query_parts, params = build_sql_params(filters)
 # LOAD DATA WITH CACHING
 # ============================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_cached_can_data(query_parts: str, params_tuple: tuple) -> pd.DataFrame:
     """Wrapper function for caching CAN data"""
     params_dict = dict(params_tuple) if params_tuple else {}
     return can_service.load_can_data(query_parts, params_dict)
 
+# Check if we need to refresh data (after update)
+force_refresh = st.session_state.pop('_can_data_updated', False)
+
+_log_step("Before load CAN data")
 with st.spinner("📦 Loading CAN data..."):
     try:
         params_tuple = tuple(sorted(params.items())) if params else ()
-        can_df = get_cached_can_data(query_parts, params_tuple)
+        
+        # If data was updated, we need fresh data on next filter change
+        # But for now, use the locally updated DataFrame if available
+        if force_refresh and '_can_df_for_fragment' in st.session_state:
+            can_df = st.session_state['_can_df_for_fragment']
+            _log_step("Used cached local DataFrame")
+        else:
+            can_df = get_cached_can_data(query_parts, params_tuple)
+            _log_step("Loaded from database/cache")
+            
     except Exception as e:
         st.error(f"❌ Failed to load data: {str(e)}")
         st.exception(e)
@@ -102,61 +142,24 @@ with st.spinner("📦 Loading CAN data..."):
 # ============================================
 # DISPLAY RESULTS
 # ============================================
+_log_step("Before render results")
+
 if can_df is not None and not can_df.empty:
     st.markdown("## 📈 Key Metrics")
     render_metrics(can_df, URGENT_DAYS_THRESHOLD, CRITICAL_DAYS_THRESHOLD)
+    _log_step("After render_metrics")
     
     tab1, tab2 = st.tabs(["📋 Detailed List", "📊 Analytics"])
     
     with tab1:
+        # Detail list with fragment - pagination and editing rerun only this section
         render_detail_list(can_df, data_service=can_service)
+        _log_step("After render_detail_list")
     
     with tab2:
-        st.subheader("📊 CAN Analytics & Trends")
-        
-        analytics_df = can_df[can_df['pending_quantity'] > 0]
-        
-        if not analytics_df.empty:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### Days Pending Distribution")
-                fig1 = create_days_pending_chart(analytics_df)
-                if fig1:
-                    st.plotly_chart(fig1, use_container_width=True)
-                else:
-                    st.info("No data available for this chart")
-            
-            with col2:
-                st.markdown("#### Value by Vendor Location")
-                fig2 = create_vendor_location_chart(analytics_df)
-                if fig2:
-                    st.plotly_chart(fig2, use_container_width=True)
-                else:
-                    st.info("No data available for this chart")
-            
-            st.markdown("---")
-            st.markdown("#### Top 10 Vendors by Pending Value")
-            
-            fig3, vendor_table = create_vendor_analysis_chart(analytics_df)
-            if fig3:
-                st.plotly_chart(fig3, use_container_width=True)
-                
-                if vendor_table is not None and not vendor_table.empty:
-                    st.dataframe(vendor_table, use_container_width=True, hide_index=True)
-            else:
-                st.info("No vendor data available")
-            
-            st.markdown("---")
-            st.markdown("#### Daily Arrival Trend (Last 30 days)")
-            
-            fig4 = create_daily_trend_chart(analytics_df)
-            if fig4:
-                st.plotly_chart(fig4, use_container_width=True)
-            else:
-                st.info("No trend data available")
-        else:
-            st.info("ℹ️ No pending items to analyze with the selected filters")
+        # Analytics with fragment - charts rerun independently
+        render_analytics_tab(can_df)
+        _log_step("After render_analytics_tab")
 
 else:
     st.info("""
@@ -167,6 +170,8 @@ else:
     - Check if the date range is too narrow
     - Verify vendor or product selections
     """)
+
+_log_step("Page render complete")
 
 # ============================================
 # FOOTER
@@ -191,10 +196,15 @@ with footer_col3:
 with st.sidebar:
     st.markdown("---")
     
-    st.markdown("## 📄 Actions")
+    st.markdown("## 🔄 Actions")
     
-    if st.button("🔃 Refresh Data", use_container_width=True):
+    if st.button("📃 Refresh Data", use_container_width=True):
+        # Clear both cache and local state
         st.cache_data.clear()
+        if '_can_df_for_fragment' in st.session_state:
+            del st.session_state['_can_df_for_fragment']
+        if '_analytics_df' in st.session_state:
+            del st.session_state['_analytics_df']
         st.rerun()
     
     if st.button("🏠 Reset Filters", use_container_width=True):
@@ -221,3 +231,31 @@ with st.sidebar:
         critical_items = len(pending_df[pending_df['days_since_arrival'] > CRITICAL_DAYS_THRESHOLD])
         if critical_items > 0:
             st.error(f"🚨 {critical_items} critical items (>{CRITICAL_DAYS_THRESHOLD}d)")
+    
+    # ============================================
+    # TIMING DEBUG SECTION
+    # ============================================
+    st.markdown("---")
+    st.markdown("## ⏱️ Performance Debug")
+    
+    if '_page_timing' in st.session_state and st.session_state._page_timing.get('steps'):
+        steps = st.session_state._page_timing['steps']
+        with st.expander("Page Load Timing", expanded=False):
+            prev_elapsed = 0
+            for step in steps:
+                delta = step['elapsed'] - prev_elapsed
+                color = "🟢" if delta < 0.5 else "🟡" if delta < 1.0 else "🔴"
+                st.text(f"{color} {step['step']}: +{delta:.3f}s (total: {step['elapsed']:.3f}s)")
+                prev_elapsed = step['elapsed']
+            
+            if steps:
+                total = steps[-1]['elapsed']
+                st.markdown(f"**Total page load: {total:.3f}s**")
+    
+    # Show last save timing if available
+    if '_timing_logs' in st.session_state and st.session_state._timing_logs:
+        with st.expander("Last Save Timing", expanded=False):
+            for log in st.session_state._timing_logs:
+                color = "🟢" if log['elapsed'] < 0.5 else "🟡" if log['elapsed'] < 1.0 else "🔴"
+                extra = f" - {log['extra']}" if log['extra'] else ""
+                st.text(f"{color} {log['operation']}: {log['elapsed']:.3f}s{extra}")
