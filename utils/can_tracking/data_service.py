@@ -22,7 +22,7 @@ class CANDataService:
         from utils.db import get_db_engine
         self.engine = engine or get_db_engine()
     
-    @st.cache_data(ttl=3600)
+    @st.cache_data(ttl=7200)  # 2 hours - filter options rarely change
     def get_filter_options(_self) -> Dict[str, Any]:
         """
         Get all filter options for dropdowns

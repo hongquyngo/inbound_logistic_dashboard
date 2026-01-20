@@ -391,6 +391,9 @@ def _render_apply_dialog() -> None:
         
         st.markdown(f"### {len(changes)} change{'s' if len(changes) > 1 else ''} to apply")
         
+        # Check if processing is in progress (for disabling Remove buttons)
+        is_processing = st.session_state.get('_apply_in_progress', False)
+        
         # List all changes
         for i, (an, change) in enumerate(changes.items(), 1):
             with st.container():
@@ -406,7 +409,7 @@ def _render_apply_dialog() -> None:
                 
                 col1, col2 = st.columns([4, 1])
                 with col2:
-                    if st.button("Remove", key=f"remove_{an}", use_container_width=True):
+                    if st.button("Remove", key=f"remove_{an}", use_container_width=True, disabled=is_processing):
                         pending_manager.remove_change(an)
                         st.rerun()
                 
@@ -421,16 +424,22 @@ def _render_apply_dialog() -> None:
         progress_placeholder = st.empty()
         status_placeholder = st.empty()
         
-        # Action buttons
+        # Check if processing is in progress
+        is_processing = st.session_state.get('_apply_in_progress', False)
+        
+        # Action buttons - disabled when processing
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("Cancel", use_container_width=True, key="cancel_apply"):
+            if st.button("Cancel", use_container_width=True, key="cancel_apply", disabled=is_processing):
                 st.session_state._show_apply_dialog = False
                 st.rerun()
         
         with col2:
-            if st.button("✓ Confirm & Apply", type="primary", use_container_width=True, key="confirm_apply"):
+            if st.button("✓ Confirm & Apply", type="primary", use_container_width=True, key="confirm_apply", disabled=is_processing):
+                # Set processing flag to disable buttons
+                st.session_state._apply_in_progress = True
+                
                 # Process changes
                 _process_batch_changes(
                     pending_manager=pending_manager,
@@ -548,10 +557,21 @@ def _process_batch_changes(
     # Show timing summary
     _display_timing_summary()
     
-    # Add close button
+    # Clear processing flag
+    st.session_state._apply_in_progress = False
+    
+    # Add close button that will refresh the page
     if st.button("Close", key="close_after_apply"):
+        # Clear all dialog states
         st.session_state._show_apply_dialog = False
+        st.session_state._apply_in_progress = False
+        
+        # Clear cached data to reload fresh
+        if '_can_df_for_fragment' in st.session_state:
+            del st.session_state['_can_df_for_fragment']
         st.cache_data.clear()
+        
+        # Full page rerun to update pending changes section
         st.rerun()
 
 
