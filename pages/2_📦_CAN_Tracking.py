@@ -115,31 +115,47 @@ filters = render_filters(filter_options, default_date_range)
 query_parts, params = build_sql_params(filters)
 
 # ============================================
-# LOAD DATA WITH CACHING
+# LOAD DATA WITH CACHING & FILTER TRACKING
 # ============================================
+import hashlib
+import json
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_can_data(query_parts: str, params_tuple: tuple) -> pd.DataFrame:
-    """Wrapper function for caching CAN data"""
     params_dict = dict(params_tuple) if params_tuple else {}
     return can_service.load_can_data(query_parts, params_dict)
 
+# 1. Tạo hash định danh cho bộ filter hiện tại
+current_filter_state = {
+    'query': query_parts,
+    'params': {k: str(v) for k, v in params.items()} # Chuyển date về string để serialize
+}
+filter_hash = hashlib.md5(json.dumps(current_filter_state, sort_keys=True).encode()).hexdigest()
+
+# 2. Kiểm tra nếu filter thay đổi thì xóa dữ liệu local cũ
+if st.session_state.get('_last_filter_hash') != filter_hash:
+    if '_can_df_for_fragment' in st.session_state:
+        del st.session_state['_can_df_for_fragment']
+    st.session_state._last_filter_hash = filter_hash
+    _log_step("Filters changed - Invalided local cache")
+
+# 3. Load dữ liệu
 _log_step("Before load CAN data")
 with st.spinner("📦 Loading CAN data..."):
     try:
         params_tuple = tuple(sorted(params.items())) if params else ()
         
-        # Check if we have locally updated DataFrame
+        # Nếu có dữ liệu trong session (do đang sửa dở) thì dùng, 
+        # Nếu không (hoặc vừa bị xóa ở bước 2) thì load từ DB
         if '_can_df_for_fragment' in st.session_state:
             can_df = st.session_state['_can_df_for_fragment']
-            _log_step("Used local DataFrame")
+            _log_step("Used local staged DataFrame")
         else:
             can_df = get_cached_can_data(query_parts, params_tuple)
-            _log_step("Loaded from database/cache")
+            _log_step("Loaded fresh data from database")
             
     except Exception as e:
         st.error(f"❌ Failed to load data: {str(e)}")
-        st.exception(e)
         st.stop()
 
 # ============================================

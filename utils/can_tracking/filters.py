@@ -176,22 +176,11 @@ def render_filters(filter_options: Dict[str, Any], default_date_range: Tuple) ->
         'stocked_in_statuses': selected_stockin_status if selected_stockin_status else None
     }
 
-
 def build_sql_params(filters: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """
-    Convert UI filters to SQL WHERE clauses and parameters
-    Handles exclusion logic (NOT IN vs IN)
-    
-    Args:
-        filters: Dictionary from render_filters()
-        
-    Returns:
-        Tuple of (query_parts_string, params_dict)
-    """
     query_parts = []
     params = {}
     
-    # Date range filter (uses adjusted date)
+    # Date range filter
     if filters.get('arrival_date_from'):
         query_parts.append("arrival_date >= :date_from")
         params['date_from'] = filters['arrival_date_from']
@@ -200,112 +189,50 @@ def build_sql_params(filters: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         query_parts.append("arrival_date <= :date_to")
         params['date_to'] = filters['arrival_date_to']
     
-    # Helper function to add filter with exclusion logic
     def add_filter(column: str, values: List, exclude: bool, param_name: str):
         if not values:
             return
-            
         operator = "NOT IN" if exclude else "IN"
         
-        # Handle compound columns (CODE - NAME format)
-        if column in ['vendor', 'vendor_code']:
-            codes = []
+        # Xử lý đặc biệt cho các cột ghép (Code - Name)
+        if column in ['vendor', 'consignee']:
             names = []
             for val in values:
                 if ' - ' in val:
-                    code, name = val.split(' - ', 1)
-                    codes.append(code.strip())
-                    names.append(name.strip())
+                    # Lấy phần Name sau dấu ' - '
+                    names.append(val.split(' - ', 1)[1].strip())
                 else:
-                    names.append(val)
+                    names.append(val.strip())
             
-            if codes and names:
-                query_parts.append(
-                    f"(vendor {operator} :{param_name}_names OR vendor_code {operator} :{param_name}_codes)"
-                )
-                params[f'{param_name}_names'] = tuple(names)
-                params[f'{param_name}_codes'] = tuple(codes)
-            elif names:
-                query_parts.append(f"vendor {operator} :{param_name}_names")
-                params[f'{param_name}_names'] = tuple(names)
-                
-        elif column in ['consignee', 'consignee_code']:
-            codes = []
-            names = []
-            for val in values:
-                if ' - ' in val:
-                    code, name = val.split(' - ', 1)
-                    codes.append(code.strip())
-                    names.append(name.strip())
-                else:
-                    names.append(val)
-            
-            if codes and names:
-                query_parts.append(
-                    f"(consignee {operator} :{param_name}_names OR consignee_code {operator} :{param_name}_codes)"
-                )
-                params[f'{param_name}_names'] = tuple(names)
-                params[f'{param_name}_codes'] = tuple(codes)
-            elif names:
-                query_parts.append(f"consignee {operator} :{param_name}_names")
-                params[f'{param_name}_names'] = tuple(names)
-                
-        elif column in ['product_name', 'pt_code']:
-            # Parse "PT_CODE | Name | Size (Brand)" format
-            pt_codes = []
+            if names:
+                query_parts.append(f"{column} {operator} :{param_name}")
+                params[param_name] = tuple(names)
+
+        elif column == 'product_name':
             product_names = []
             for val in values:
                 parts = val.split(' | ')
                 if len(parts) >= 2:
-                    pt_code = parts[0].strip()
-                    product_name = parts[1].strip()
-                    pt_codes.append(pt_code)
-                    product_names.append(product_name)
-            
-            if pt_codes and product_names:
-                query_parts.append(
-                    f"(pt_code {operator} :{param_name}_codes OR product_name {operator} :{param_name}_names)"
-                )
-                params[f'{param_name}_codes'] = tuple(pt_codes)
-                params[f'{param_name}_names'] = tuple(product_names)
-            elif pt_codes:
-                query_parts.append(f"pt_code {operator} :{param_name}_codes")
-                params[f'{param_name}_codes'] = tuple(pt_codes)
-        
-        # ✅ FIXED: Handle stocked_in_status properly with subquery
-        elif column == 'stocked_in_status':
-            if exclude:
-                # Exclude specific statuses
-                status_conditions = []
-                for status in values:
-                    if status == 'partially_stocked_in':
-                        status_conditions.append("stocked_in_status != 'partially_stocked_in'")
-                    elif status == 'completed':
-                        status_conditions.append("stocked_in_status != 'completed'")
-                if status_conditions:
-                    query_parts.append(f"({' AND '.join(status_conditions)})")
-            else:
-                # Include specific statuses
-                query_parts.append(f"stocked_in_status {operator} :{param_name}")
-                params[param_name] = tuple(values)
-        
-        # Simple column filters
+                    product_names.append(parts[1].strip())
+            if product_names:
+                query_parts.append(f"product_name {operator} :{param_name}")
+                params[param_name] = tuple(product_names)
+
         else:
+            # Các cột đơn giản như vendor_location_type, warehouse_name...
             query_parts.append(f"{column} {operator} :{param_name}")
             params[param_name] = tuple(values)
     
-    # Apply all filters
-    add_filter('warehouse_name', filters.get('warehouses'), False, 'warehouses')
-    add_filter('vendor', filters.get('vendors'), filters.get('excl_vendors', False), 'vendors')
-    add_filter('consignee', filters.get('consignees'), False, 'consignees')
-    add_filter('product_name', filters.get('products'), filters.get('excl_products', False), 'products')
-    add_filter('brand', filters.get('brands'), filters.get('excl_brands', False), 'brands')
-    add_filter('vendor_type', filters.get('vendor_types'), False, 'vendor_types')
-    add_filter('vendor_location_type', filters.get('vendor_locations'), False, 'vendor_locations')
-    add_filter('can_status', filters.get('can_statuses'), filters.get('excl_can_statuses', False), 'can_statuses')
-    add_filter('stocked_in_status', filters.get('stocked_in_statuses'), False, 'stocked_in_statuses')
+    # Áp dụng các filter theo đúng tên cột trong SQL View
+    add_filter('warehouse_name', filters.get('warehouses'), False, 'wh_names')
+    add_filter('vendor', filters.get('vendors'), filters.get('excl_vendors'), 'v_names')
+    add_filter('consignee', filters.get('consignees'), False, 'c_names')
+    add_filter('product_name', filters.get('products'), filters.get('excl_products'), 'p_names')
+    add_filter('brand', filters.get('brands'), filters.get('excl_brands'), 'b_names')
+    add_filter('vendor_type', filters.get('vendor_types'), False, 'v_types')
+    add_filter('vendor_location_type', filters.get('vendor_locations'), False, 'v_locs')
+    add_filter('can_status', filters.get('can_statuses'), filters.get('excl_can_statuses'), 'can_stats')
+    add_filter('stocked_in_status', filters.get('stocked_in_statuses'), False, 'stock_stats')
     
-    # Join all parts
-    query_string = " AND ".join(query_parts) if query_parts else ""
-    
-    return query_string, params
+    return " AND ".join(query_parts) if query_parts else "", params
+
