@@ -1,4 +1,4 @@
-# utils/invoice_data.py
+# utils/vendor_invoice/invoice_data.py
 # Complete implementation with all invoice management functions
 
 import pandas as pd

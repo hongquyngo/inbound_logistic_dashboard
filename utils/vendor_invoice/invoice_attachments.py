@@ -1,4 +1,4 @@
-# utils/invoice_attachments.py
+# utils/vendor_invoice/invoice_attachments.py
 
 import pandas as pd
 from sqlalchemy import text

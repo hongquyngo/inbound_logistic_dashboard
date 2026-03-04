@@ -1,4 +1,4 @@
-# utils/s3_utils.py
+# utils/vendor_invoice/s3_utils.py
 
 import boto3
 from botocore.exceptions import ClientError

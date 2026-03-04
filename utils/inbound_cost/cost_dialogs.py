@@ -1,11 +1,14 @@
 # utils/inbound_cost/cost_dialogs.py
 # All @st.dialog functions for Inbound Logistic Cost module.
 # Pattern mirrors utils/vendor_invoice/invoice_dialogs.py
+#
+# IMPORT RULE: Only intra-package imports at module level.
+# S3Manager (and anything that pulls config) is imported LAZILY inside functions.
 
 import streamlit as st
 import pandas as pd
 import logging
-from typing import Optional, Dict
+from typing import Dict, List, Optional
 
 from .cost_data import (
     get_cost_by_id,
@@ -15,24 +18,76 @@ from .cost_data import (
     create_cost_entry,
     update_cost_entry,
     delete_cost_entry,
+    get_cost_attachments,
+    save_cost_media_records,
+    delete_cost_attachment,
 )
-from ..s3_utils import S3Manager
+from .cost_attachments import (
+    validate_uploaded_files,
+    prepare_files_for_upload,
+    upload_files_to_s3,
+    cleanup_failed_uploads,
+    get_presigned_url,
+    get_file_icon,
+    format_file_size,
+    summarize_files,
+)
+from .cost_service import CostService
 
 logger = logging.getLogger(__name__)
 
-# ─── Shared helpers ──────────────────────────────────────────────────────────
 
-def _auth_user():
-    from utils.auth import AuthManager
-    return AuthManager().get_current_user()
+# ============================================================================
+# SHARED HELPERS
+# ============================================================================
 
-def _invalidate():
+def _get_user():
+    """Get current authenticated user from session."""
+    try:
+        from utils.auth import AuthManager
+        return AuthManager().get_current_user()
+    except Exception:
+        return None
+
+
+def _keycloak_id(user) -> str:
+    if user is None:
+        return "unknown"
+    return (
+        getattr(user, "keycloak_id", None)
+        or getattr(user, "id", None)
+        or "unknown"
+    )
+
+
+def _invalidate_cache():
+    """Signal main page to clear cost list cache on next render."""
     st.session_state["_invalidate_cost_cache"] = True
 
-def _fmt_amount(amount, currency):
-    if amount is None:
-        return "N/A"
-    return f"{amount:,.2f} {currency or ''}"
+
+def _fmt(amount, currency="") -> str:
+    if amount is None or (isinstance(amount, float) and pd.isna(amount)):
+        return "—"
+    return f"{float(amount):,.2f} {currency}".strip()
+
+
+# ============================================================================
+# CACHED DB CALLS (avoid hitting DB on every dialog rerun)
+# ============================================================================
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_cost_types() -> pd.DataFrame:
+    return get_cost_type_options()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_arrivals() -> pd.DataFrame:
+    return get_arrival_options(limit=500)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_vendors() -> pd.DataFrame:
+    return get_vendor_options()
 
 
 # ============================================================================
@@ -46,89 +101,84 @@ def view_cost_dialog(cost_id: int):
         st.error("Cost entry not found.")
         return
 
-    # Header badge
-    cat_color = "🟦" if entry.get("category") == "INTERNATIONAL" else "🟩"
-    st.markdown(
-        f"### {cat_color} {entry.get('logistic_charge', '—')} "
-        f"&nbsp;|&nbsp; CAN: `{entry.get('can_number', '—')}`"
-    )
+    cat_badge = "🟦 INTERNATIONAL" if entry.get("category") == "INTERNATIONAL" else "🟩 LOCAL"
+    st.markdown(f"### {cat_badge} — {entry.get('logistic_charge', '—')}")
+    st.caption(f"Cost entry **#{cost_id}** | CAN: **{entry.get('can_number', '—')}**")
     st.markdown("---")
 
-    # ── Costs & currency ─────────────────────────────────────────────────────
+    # ── Amounts ──────────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns(3)
-    c1.metric("Amount", _fmt_amount(entry.get("amount"), entry.get("currency_code")))
-    c2.metric("Amount (USD)", f"${entry.get('amount_usd', 0):,.2f}" if entry.get("amount_usd") else "N/A")
-    c3.metric("Cost / Unit (USD)", f"${entry.get('cost_per_unit_usd', 0):,.6f}" if entry.get("cost_per_unit_usd") else "N/A")
+    c1.metric("Amount", _fmt(entry.get("amount"), entry.get("currency_code", "")))
+    c2.metric("Amount (USD)", f"${float(entry.get('amount_usd') or 0):,.2f}"
+              if entry.get("amount_usd") else "—")
+    c3.metric("Cost / Unit (USD)", f"${float(entry.get('cost_per_unit_usd') or 0):,.6f}"
+              if entry.get("cost_per_unit_usd") else "—")
 
     st.markdown("---")
 
-    # ── Arrival info ──────────────────────────────────────────────────────────
+    # ── Arrival / Shipment ────────────────────────────────────────────────────
     st.markdown("#### 🚢 Arrival / Shipment")
-    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-    r1c1.markdown(f"**CAN #**\n\n{entry.get('can_number','—')}")
-    r1c2.markdown(f"**Arrival Date**\n\n{str(entry.get('arrival_date','—'))[:10]}")
-    r1c3.markdown(f"**Ship Method**\n\n{entry.get('ship_method','—')}")
-    r1c4.markdown(f"**Status**\n\n{entry.get('arrival_status','—')}")
+    r1, r2, r3, r4 = st.columns(4)
+    r1.markdown(f"**CAN #**\n\n{entry.get('can_number','—')}")
+    r2.markdown(f"**Date**\n\n{str(entry.get('arrival_date','—'))[:10]}")
+    r3.markdown(f"**Ship Method**\n\n{entry.get('ship_method','—') or '—'}")
+    r4.markdown(f"**Status**\n\n{entry.get('arrival_status','—') or '—'}")
 
-    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-    r2c1.markdown(f"**Sender**\n\n{entry.get('sender','—')}")
-    r2c2.markdown(f"**Receiver**\n\n{entry.get('receiver','—')}")
-    r2c3.markdown(f"**Shipment Type**\n\n{entry.get('shipment_type','—')}")
-    r2c4.markdown(f"**Courier**\n\n{entry.get('courier','—')}")
+    r5, r6, r7, r8 = st.columns(4)
+    r5.markdown(f"**Sender**\n\n{entry.get('sender','—') or '—'}")
+    r6.markdown(f"**Receiver**\n\n{entry.get('receiver','—') or '—'}")
+    r7.markdown(f"**Shipment**\n\n{entry.get('shipment_type','—') or '—'}")
+    r8.markdown(f"**Courier**\n\n{entry.get('courier','—') or '—'}")
 
     st.markdown("---")
 
-    # ── Warehouse & products ──────────────────────────────────────────────────
+    # ── Warehouse + Products ──────────────────────────────────────────────────
     wc1, wc2 = st.columns(2)
     with wc1:
         st.markdown("#### 🏭 Warehouse")
         st.markdown(
             f"**{entry.get('warehouse_name','—')}**  \n"
-            f"{entry.get('warehouse_state','')} {entry.get('warehouse_country','')}"
+            f"{entry.get('warehouse_state','') or ''} "
+            f"{entry.get('warehouse_country','') or ''}"
         )
     with wc2:
         st.markdown("#### 📦 Products in CAN")
-        codes = (entry.get("product_codes") or "—")
-        names = (entry.get("product_names") or "—")
-        st.caption(f"Codes: {codes}")
-        st.caption(f"Names: {names}")
+        st.caption(f"Codes : {entry.get('product_codes','—') or '—'}")
+        st.caption(f"Names : {entry.get('product_names','—') or '—'}")
 
     # ── Arrival context ───────────────────────────────────────────────────────
     st.markdown("---")
     ac1, ac2 = st.columns(2)
-    ac1.metric("Total Arrival Qty", f"{entry.get('total_arrival_qty', 0):,.0f}")
-    ac2.metric("Lines in CAN", entry.get("arrival_line_count", "—"))
+    ac1.metric("Total Arrival Qty", f"{float(entry.get('total_arrival_qty') or 0):,.0f}")
+    ac2.metric("Lines in CAN",      entry.get("arrival_line_count", "—"))
 
-    # ── Documents ────────────────────────────────────────────────────────────
-    doc_count = entry.get("doc_count", 0)
-    if doc_count and int(doc_count) > 0:
+    # ── Attachments ───────────────────────────────────────────────────────────
+    doc_count = int(entry.get("doc_count") or 0)
+    if doc_count > 0:
         st.markdown("---")
         st.markdown(f"#### 📎 Attachments ({doc_count})")
         paths = (entry.get("doc_paths") or "").split("|")
         names = (entry.get("doc_names") or "").split("|")
-        try:
-            s3 = S3Manager()
-            for p, n in zip(paths, names):
-                p, n = p.strip(), n.strip()
-                if not p:
-                    continue
-                url = s3.get_presigned_url(p)
-                if url:
-                    st.markdown(f"📄 [{n}]({url})")
-                else:
-                    st.caption(f"📄 {n} *(preview unavailable)*")
-        except Exception as e:
-            st.caption(f"Could not load document links: {e}")
+        for p, n in zip(paths, names):
+            p, n = p.strip(), n.strip()
+            if not p:
+                continue
+            url = get_presigned_url(p)   # lazy S3Manager inside
+            icon = get_file_icon(n)
+            if url:
+                st.markdown(f"{icon} [{n}]({url})")
+            else:
+                st.caption(f"{icon} {n} *(preview unavailable)*")
 
     # ── Audit ─────────────────────────────────────────────────────────────────
     st.markdown("---")
-    au1, au2, au3 = st.columns(3)
-    au1.caption(f"Created by: {entry.get('cost_created_by','—')}")
-    au2.caption(f"Created: {str(entry.get('cost_created_date','—'))[:19]}")
-    au3.caption(f"Modified: {str(entry.get('cost_modified_date','—'))[:19]}")
+    a1, a2, a3 = st.columns(3)
+    a1.caption(f"Created by: {entry.get('cost_created_by','—')}")
+    a2.caption(f"Created:    {str(entry.get('cost_created_date','—'))[:19]}")
+    a3.caption(f"Modified:   {str(entry.get('cost_modified_date','—'))[:19]}")
 
     st.markdown("---")
-    if st.button("Close", use_container_width=True):
+    if st.button("Close", use_container_width=True, key="view_close"):
         st.rerun()
 
 
@@ -138,20 +188,16 @@ def view_cost_dialog(cost_id: int):
 
 @st.dialog("➕ Add Inbound Cost Entry", width="large")
 def create_cost_dialog():
-    user = _auth_user()
-
+    user = _get_user()
     st.markdown("### New Logistics Cost Entry")
     st.caption("Add an international or local charge to a Cargo Arrival Note (CAN).")
     st.markdown("---")
 
-    # ── Cost type ─────────────────────────────────────────────────────────────
-    types_df = get_cost_type_options()
+    # ── Step 1: Charge type ───────────────────────────────────────────────────
+    types_df = _cached_cost_types()
     if types_df.empty:
-        st.error("Cannot load cost types from database.")
+        st.error("Cannot load charge types from database.")
         return
-
-    intl_types = types_df[types_df["type"] == "INTERNATIONAL"]
-    local_types = types_df[types_df["type"] == "LOCAL"]
 
     cat_col, type_col = st.columns(2)
     with cat_col:
@@ -159,26 +205,27 @@ def create_cost_dialog():
             "Category *",
             ["INTERNATIONAL", "LOCAL"],
             key="cc_category",
-            help="INTERNATIONAL = freight/ocean/air; LOCAL = customs, trucking, etc.",
+            help="INTERNATIONAL = freight/ocean/air  |  LOCAL = customs, trucking, etc.",
         )
     with type_col:
-        subset = intl_types if category == "INTERNATIONAL" else local_types
+        subset = types_df[types_df["type"] == category]
         if subset.empty:
-            st.warning(f"No {category} cost types defined.")
+            st.warning(f"No {category} charge types defined in master data.")
             return
-        type_options = {row["name"]: row["id"] for _, row in subset.iterrows()}
-        selected_type_name = st.selectbox("Charge Type *", list(type_options.keys()), key="cc_type")
-        selected_type_id = type_options[selected_type_name]
+        type_map = {row["name"]: row["id"] for _, row in subset.iterrows()}
+        sel_type_name = st.selectbox("Charge Type *", list(type_map.keys()), key="cc_type")
+        sel_type_id   = type_map[sel_type_name]
 
-    # ── Arrival (CAN) selection ───────────────────────────────────────────────
+    # ── Step 2: Select CAN ────────────────────────────────────────────────────
     st.markdown("#### Cargo Arrival Note (CAN)")
-    arrivals_df = get_arrival_options()
+    arrivals_df = _cached_arrivals()
     if arrivals_df.empty:
         st.error("Cannot load arrivals from database.")
         return
 
-    # Search box to narrow CAN list
-    can_search = st.text_input("Search CAN", placeholder="Type CAN # or sender…", key="cc_can_search")
+    can_search = st.text_input(
+        "Search CAN", placeholder="CAN number or sender name…", key="cc_can_search"
+    )
     if can_search:
         mask = (
             arrivals_df["arrival_note_number"].str.contains(can_search, case=False, na=False)
@@ -199,69 +246,115 @@ def create_cost_dialog():
         ),
         axis=1,
     )
-    can_label_map = dict(zip(arrivals_df["label"], arrivals_df["id"]))
-    selected_can_label = st.selectbox("Select CAN *", list(can_label_map.keys()), key="cc_can")
-    selected_arrival_id = can_label_map[selected_can_label]
+    can_map      = dict(zip(arrivals_df["label"], arrivals_df["id"]))
+    sel_can_lbl  = st.selectbox("Select CAN *", list(can_map.keys()), key="cc_can")
+    sel_arr_id   = can_map[sel_can_lbl]
 
-    # ── Amount & vendor ───────────────────────────────────────────────────────
+    # ── Step 3: Amount + Vendor ───────────────────────────────────────────────
     st.markdown("---")
     amt_col, vendor_col = st.columns(2)
     with amt_col:
         amount = st.number_input(
             "Amount *",
-            min_value=0.01, step=0.01, format="%.2f",
-            key="cc_amount",
-            help="Enter amount in the CAN's charge currency (set on the arrival record)",
+            min_value=0.01, step=0.01, format="%.2f", key="cc_amount",
+            help="Enter in the CAN's charge currency (set on the arrival record).",
         )
     with vendor_col:
-        vendors_df = get_vendor_options()
-        vendor_options = {"— Not specified —": None}
+        vendors_df = _cached_vendors()
+        vendor_map = {"— Not specified —": None}
         if not vendors_df.empty:
-            vendor_options.update({
+            vendor_map.update({
                 f"{r['name']} ({r['company_code']})": r["id"]
                 for _, r in vendors_df.iterrows()
             })
-        selected_vendor_label = st.selectbox(
-            "Logistics Vendor / Courier", list(vendor_options.keys()), key="cc_vendor"
+        sel_vendor_lbl = st.selectbox(
+            "Logistics Vendor / Courier", list(vendor_map.keys()), key="cc_vendor"
         )
-        selected_vendor_id = vendor_options[selected_vendor_label]
+        sel_vendor_id = vendor_map[sel_vendor_lbl]
 
+    # ── Step 4: Attachments (optional) ───────────────────────────────────────
     st.markdown("---")
+    with st.expander("📎 Attach Documents (optional)", expanded=False):
+        uploaded = st.file_uploader(
+            "Upload files",
+            type=ALLOWED_EXTENSIONS_DISPLAY,
+            accept_multiple_files=True,
+            key="cc_files",
+        )
+        if uploaded:
+            ok, errs, meta = validate_uploaded_files(uploaded)
+            if errs:
+                for e in errs:
+                    st.error(e)
+            else:
+                summary = summarize_files(meta)
+                st.success(
+                    f"✅ {summary['count']} file(s) ready — "
+                    f"{summary['total_size_formatted']} — "
+                    f"Types: {', '.join(summary['types'])}"
+                )
 
     # ── Actions ───────────────────────────────────────────────────────────────
-    col_save, col_cancel = st.columns(2)
-    with col_cancel:
+    st.markdown("---")
+    save_col, cancel_col = st.columns(2)
+    with cancel_col:
         if st.button("Cancel", use_container_width=True, key="cc_cancel"):
             st.rerun()
-    with col_save:
+    with save_col:
         if st.button("💾 Save", type="primary", use_container_width=True, key="cc_save"):
-            if amount <= 0:
-                st.error("Amount must be greater than 0.")
+            valid, err_msg = CostService.validate_new_entry(sel_type_id, sel_arr_id, amount)
+            if not valid:
+                st.error(err_msg)
                 return
 
-            keycloak_id = getattr(user, "keycloak_id", None) or getattr(user, "id", "unknown")
-            ok, new_id, err = create_cost_entry(
-                cost_type_id=selected_type_id,
+            uid = _keycloak_id(user)
+
+            # Upload files if any
+            s3_keys = []
+            if uploaded:
+                ok, errs, meta = validate_uploaded_files(uploaded)
+                if not ok:
+                    for e in errs:
+                        st.error(e)
+                    return
+                prepared         = prepare_files_for_upload(uploaded)
+                s3_keys, failed  = upload_files_to_s3(prepared)
+                if failed:
+                    st.warning(f"⚠️ {len(failed)} file(s) failed to upload: {', '.join(failed)}")
+
+            # Create cost entry
+            ok, new_id, db_err = create_cost_entry(
+                cost_type_id=sel_type_id,
                 arrival_type=category,
-                arrival_id=selected_arrival_id,
-                vendor_id=selected_vendor_id,
+                arrival_id=sel_arr_id,
+                vendor_id=sel_vendor_id,
                 amount=amount,
-                created_by=keycloak_id,
+                created_by=uid,
             )
-            if ok:
-                st.success(f"✅ Cost entry #{new_id} created successfully!")
-                _invalidate()
-                # Clear cache for arrivals view
-                get_cost_type_options.clear()
-                st.session_state["_last_created_cost"] = {
-                    "id": new_id,
-                    "type": selected_type_name,
-                    "amount": amount,
-                    "category": category,
-                }
-                st.rerun()
-            else:
-                st.error(f"❌ {err}")
+            if not ok:
+                cleanup_failed_uploads(s3_keys)
+                st.error(f"❌ {db_err}")
+                return
+
+            # Link attachments
+            if s3_keys:
+                att_ok, _, att_err = save_cost_media_records(new_id, s3_keys, uid)
+                if not att_ok:
+                    st.warning(f"⚠️ Entry saved but attachments failed: {att_err}")
+
+            st.success(f"✅ Cost entry #{new_id} created — {category} / {sel_type_name}")
+            _invalidate_cache()
+            st.session_state["_last_created_cost"] = {
+                "id":       new_id,
+                "type":     sel_type_name,
+                "category": category,
+                "amount":   amount,
+            }
+            st.rerun()
+
+
+# ── constant used in the dialog (avoids import at module level) ───────────────
+ALLOWED_EXTENSIONS_DISPLAY = ["pdf", "png", "jpg", "jpeg"]
 
 
 # ============================================================================
@@ -270,130 +363,123 @@ def create_cost_dialog():
 
 @st.dialog("✏️ Edit Cost Entry", width="large")
 def edit_cost_dialog(cost_id: int):
-    user = _auth_user()
+    user  = _get_user()
     entry = get_cost_by_id(cost_id)
     if not entry:
         st.error("Cost entry not found.")
         return
 
     st.markdown(
-        f"### Editing Cost `#{cost_id}` — "
-        f"CAN: **{entry.get('can_number','—')}**"
-    )
-    st.caption(
-        f"Arrival: {str(entry.get('arrival_date',''))[:10]}  |  "
-        f"Shipment: {entry.get('shipment_type','—')}"
+        f"### Edit Cost Entry **#{cost_id}**\n\n"
+        f"CAN: **{entry.get('can_number','—')}** | "
+        f"Date: {str(entry.get('arrival_date',''))[:10]}"
     )
     st.markdown("---")
 
-    # ── Cost type (only within same category) ─────────────────────────────────
-    types_df = get_cost_type_options()
+    # ── Charge type (same category only) ─────────────────────────────────────
+    types_df   = _cached_cost_types()
     current_cat = entry.get("category", "INTERNATIONAL")
-    subset = types_df[types_df["type"] == current_cat]
-    type_options = {row["name"]: row["id"] for _, row in subset.iterrows()}
+    subset      = types_df[types_df["type"] == current_cat]
+    type_map    = {r["name"]: r["id"] for _, r in subset.iterrows()}
 
-    current_type_name = entry.get("logistic_charge", "")
-    default_idx = list(type_options.keys()).index(current_type_name) if current_type_name in type_options else 0
+    cur_type_name = entry.get("logistic_charge", "")
+    default_idx   = list(type_map.keys()).index(cur_type_name) \
+                    if cur_type_name in type_map else 0
 
-    type_col, _ = st.columns(2)
-    with type_col:
-        st.caption(f"Category: **{current_cat}** (cannot change on existing entry)")
-        selected_type_name = st.selectbox(
-            "Charge Type *",
-            list(type_options.keys()),
-            index=default_idx,
-            key="ec_type",
+    tc, _ = st.columns(2)
+    with tc:
+        st.caption(f"Category: **{current_cat}** (fixed on existing entry)")
+        sel_type_name = st.selectbox(
+            "Charge Type *", list(type_map.keys()),
+            index=default_idx, key="ec_type"
         )
-        selected_type_id = type_options[selected_type_name]
+        sel_type_id = type_map[sel_type_name]
 
     # ── Amount ────────────────────────────────────────────────────────────────
-    amt_col, curr_col = st.columns(2)
-    with amt_col:
+    ac, cc = st.columns(2)
+    with ac:
         new_amount = st.number_input(
             "Amount *",
-            value=float(entry.get("amount", 0.0)),
+            value=float(entry.get("amount") or 0.0),
             min_value=0.01, step=0.01, format="%.2f",
             key="ec_amount",
         )
-    with curr_col:
+    with cc:
         st.text_input(
-            "Currency",
-            value=entry.get("currency_code", "—"),
-            disabled=True,
-            key="ec_currency",
-            help="Currency is determined by the arrival record and cannot be changed here.",
+            "Currency", value=entry.get("currency_code", "—"),
+            disabled=True, key="ec_currency",
+            help="Currency is set on the arrival record — not editable here.",
         )
-        if entry.get("amount_usd"):
-            ratio = (new_amount / float(entry.get("amount", 1))) if entry.get("amount") else 1
-            st.caption(f"≈ USD {float(entry.get('amount_usd', 0)) * ratio:,.2f}")
+        if entry.get("amount_usd") and entry.get("amount"):
+            ratio = new_amount / float(entry["amount"])
+            st.caption(f"≈ USD {float(entry['amount_usd']) * ratio:,.2f}")
 
     # ── Vendor ────────────────────────────────────────────────────────────────
-    vendors_df = get_vendor_options()
-    vendor_options = {"— Not specified —": None}
+    vendors_df  = _cached_vendors()
+    vendor_map  = {"— Not specified —": None}
     if not vendors_df.empty:
-        vendor_options.update({
+        vendor_map.update({
             f"{r['name']} ({r['company_code']})": r["id"]
             for _, r in vendors_df.iterrows()
         })
 
-    current_vendor_id = entry.get("logistics_vendor_id")
-    default_vendor_label = "— Not specified —"
-    if current_vendor_id:
-        for label, vid in vendor_options.items():
-            if vid == current_vendor_id:
-                default_vendor_label = label
-                break
-
-    vendor_idx = list(vendor_options.keys()).index(default_vendor_label) if default_vendor_label in vendor_options else 0
-    selected_vendor_label = st.selectbox(
-        "Logistics Vendor / Courier",
-        list(vendor_options.keys()),
-        index=vendor_idx,
-        key="ec_vendor",
+    cur_vendor_id    = entry.get("logistics_vendor_id")
+    default_vnd_lbl  = next(
+        (lbl for lbl, vid in vendor_map.items() if vid == cur_vendor_id),
+        "— Not specified —",
     )
-    selected_vendor_id = vendor_options[selected_vendor_label]
+    vnd_idx          = list(vendor_map.keys()).index(default_vnd_lbl) \
+                       if default_vnd_lbl in vendor_map else 0
+    sel_vendor_lbl   = st.selectbox(
+        "Logistics Vendor / Courier",
+        list(vendor_map.keys()), index=vnd_idx, key="ec_vendor"
+    )
+    sel_vendor_id    = vendor_map[sel_vendor_lbl]
 
+    # Add vendor change to list if changed
+    if sel_vendor_id != cur_vendor_id:
+        vendor_change = f"Vendor: **{entry.get('courier','—')}** → **{sel_vendor_lbl}**"
+    else:
+        vendor_change = None
+
+    # ── Validation + change summary ───────────────────────────────────────────
     st.markdown("---")
+    valid, err_msg, changes = CostService.validate_edit(sel_type_id, new_amount, entry)
+    if vendor_change:
+        changes.append(vendor_change)
 
-    # ── Change summary ────────────────────────────────────────────────────────
-    changes = []
-    if selected_type_id != entry.get("cost_type_id"):
-        changes.append(f"Charge type: **{entry.get('logistic_charge')}** → **{selected_type_name}**")
-    if abs(new_amount - float(entry.get("amount", 0))) > 0.001:
-        changes.append(f"Amount: **{entry.get('amount'):,.2f}** → **{new_amount:,.2f}**")
-    if selected_vendor_id != current_vendor_id:
-        changes.append(f"Vendor: **{entry.get('courier','—')}** → **{selected_vendor_label}**")
-
-    if changes:
+    if not valid:
+        st.error(err_msg)
+    elif changes:
         st.info("**Changes to save:**\n\n" + "\n\n".join(f"• {c}" for c in changes))
     else:
         st.caption("No changes detected.")
 
-    col_save, col_cancel = st.columns(2)
-    with col_cancel:
+    # ── Actions ───────────────────────────────────────────────────────────────
+    save_col, cancel_col = st.columns(2)
+    with cancel_col:
         if st.button("Cancel", use_container_width=True, key="ec_cancel"):
             st.rerun()
-    with col_save:
-        disabled = len(changes) == 0
+    with save_col:
         if st.button(
             "💾 Save Changes", type="primary",
             use_container_width=True, key="ec_save",
-            disabled=disabled,
+            disabled=(not valid or len(changes) == 0),
         ):
-            keycloak_id = getattr(user, "keycloak_id", None) or getattr(user, "id", "unknown")
-            ok, err = update_cost_entry(
+            uid    = _keycloak_id(user)
+            ok, db_err = update_cost_entry(
                 cost_id=cost_id,
-                cost_type_id=selected_type_id,
-                vendor_id=selected_vendor_id,
+                cost_type_id=sel_type_id,
+                vendor_id=sel_vendor_id,
                 amount=new_amount,
-                updated_by=keycloak_id,
+                updated_by=uid,
             )
             if ok:
-                st.success(f"✅ Cost entry #{cost_id} updated!")
-                _invalidate()
+                st.success(f"✅ Cost entry #{cost_id} updated.")
+                _invalidate_cache()
                 st.rerun()
             else:
-                st.error(f"❌ {err}")
+                st.error(f"❌ {db_err}")
 
 
 # ============================================================================
@@ -402,7 +488,7 @@ def edit_cost_dialog(cost_id: int):
 
 @st.dialog("🗑️ Delete Cost Entry", width="small")
 def delete_cost_dialog(cost_id: int):
-    user = _auth_user()
+    user  = _get_user()
     entry = get_cost_by_id(cost_id)
     if not entry:
         st.error("Cost entry not found.")
@@ -410,30 +496,128 @@ def delete_cost_dialog(cost_id: int):
 
     st.warning("⚠️ **This action cannot be undone.**")
     st.markdown(
-        f"You are about to **delete** cost entry **#{cost_id}**:\n\n"
-        f"- **Charge type:** {entry.get('logistic_charge','—')}\n"
-        f"- **CAN:** {entry.get('can_number','—')}\n"
-        f"- **Amount:** {_fmt_amount(entry.get('amount'), entry.get('currency_code'))}\n"
-        f"- **Amount (USD):** ${entry.get('amount_usd', 0):,.2f}"
+        f"You are about to **permanently delete** entry **#{cost_id}**:\n\n"
+        f"- **Charge:**   {entry.get('logistic_charge','—')}\n"
+        f"- **Category:** {entry.get('category','—')}\n"
+        f"- **CAN:**      {entry.get('can_number','—')}\n"
+        f"- **Amount:**   {_fmt(entry.get('amount'), entry.get('currency_code',''))}\n"
+        f"- **USD:**      ${float(entry.get('amount_usd') or 0):,.2f}"
     )
     st.markdown("---")
 
-    confirm = st.checkbox("I confirm I want to delete this cost entry", key="del_confirm")
-    col_del, col_cancel = st.columns(2)
-    with col_cancel:
+    confirmed = st.checkbox(
+        "I confirm I want to delete this cost entry", key="del_confirm"
+    )
+    del_col, cancel_col = st.columns(2)
+    with cancel_col:
         if st.button("Cancel", use_container_width=True, key="del_cancel"):
             st.rerun()
-    with col_del:
+    with del_col:
         if st.button(
-            "🗑️ Delete", type="primary", use_container_width=True,
-            key="del_confirm_btn", disabled=not confirm,
+            "🗑️ Delete", type="primary",
+            use_container_width=True, key="del_btn",
+            disabled=not confirmed,
         ):
-            keycloak_id = getattr(user, "keycloak_id", None) or getattr(user, "id", "unknown")
-            ok, msg = delete_cost_entry(cost_id, deleted_by=keycloak_id)
+            uid    = _keycloak_id(user)
+            ok, msg = delete_cost_entry(cost_id, deleted_by=uid)
             if ok:
                 st.success(f"✅ {msg}")
-                _invalidate()
+                _invalidate_cache()
                 st.session_state["_last_deleted_cost"] = cost_id
                 st.rerun()
             else:
                 st.error(f"❌ {msg}")
+
+
+# ============================================================================
+# MANAGE ATTACHMENTS DIALOG
+# ============================================================================
+
+@st.dialog("📎 Manage Attachments", width="large")
+def attachments_dialog(cost_id: int):
+    """View existing attachments and upload new ones."""
+    user  = _get_user()
+    entry = get_cost_by_id(cost_id)
+    if not entry:
+        st.error("Cost entry not found.")
+        return
+
+    st.markdown(
+        f"### Attachments — Cost Entry **#{cost_id}**\n\n"
+        f"CAN: **{entry.get('can_number','—')}** | "
+        f"{entry.get('logistic_charge','—')}"
+    )
+    st.markdown("---")
+
+    # ── Existing attachments ──────────────────────────────────────────────────
+    att_df = get_cost_attachments(cost_id)
+    if att_df.empty:
+        st.info("No attachments yet.")
+    else:
+        st.markdown(f"#### Current Attachments ({len(att_df)})")
+        for _, row in att_df.iterrows():
+            col_icon, col_name, col_date, col_del = st.columns([1, 5, 3, 1])
+            with col_icon:
+                st.write(get_file_icon(row.get("filename", "")))
+            with col_name:
+                url = get_presigned_url(row.get("s3_key", ""))
+                if url:
+                    st.markdown(f"[{row.get('filename','—')}]({url})")
+                else:
+                    st.write(row.get("filename", "—"))
+            with col_date:
+                st.caption(str(row.get("created_date", ""))[:10])
+            with col_del:
+                if st.button("✕", key=f"del_att_{row['link_id']}", help="Remove"):
+                    ok, msg = delete_cost_attachment(int(row["link_id"]))
+                    if ok:
+                        st.success("Removed")
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+    # ── Upload new ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Upload New Files")
+    new_files = st.file_uploader(
+        "Select files",
+        type=ALLOWED_EXTENSIONS_DISPLAY,
+        accept_multiple_files=True,
+        key="att_upload",
+    )
+
+    if new_files:
+        ok, errs, meta = validate_uploaded_files(new_files)
+        if errs:
+            for e in errs:
+                st.error(e)
+        else:
+            summary = summarize_files(meta)
+            st.success(
+                f"✅ {summary['count']} file(s) — "
+                f"{summary['total_size_formatted']}"
+            )
+            if st.button(
+                "⬆️ Upload & Link", type="primary",
+                use_container_width=True, key="att_upload_btn"
+            ):
+                uid        = _keycloak_id(user)
+                prepared   = prepare_files_for_upload(new_files)
+                s3_keys, failed = upload_files_to_s3(prepared)
+
+                if failed:
+                    st.warning(f"⚠️ Upload failed for: {', '.join(failed)}")
+
+                if s3_keys:
+                    att_ok, _, att_err = save_cost_media_records(cost_id, s3_keys, uid)
+                    if att_ok:
+                        st.success(f"✅ {len(s3_keys)} file(s) attached.")
+                        _invalidate_cache()
+                        st.rerun()
+                    else:
+                        cleanup_failed_uploads(s3_keys)
+                        st.error(f"❌ DB error: {att_err}")
+
+    st.markdown("---")
+    if st.button("Close", use_container_width=True, key="att_close"):
+        st.rerun()

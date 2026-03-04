@@ -1,3 +1,5 @@
+# utils/vendor_invoice/payment_terms_calculator.py
+
 """
 Enhanced Payment Terms Calculator
 Handles all payment term types from database with proper categorization

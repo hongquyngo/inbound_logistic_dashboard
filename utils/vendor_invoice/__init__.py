@@ -1,4 +1,4 @@
-# utils/invoice/__init__.py
+# utils/vendor_invoice/__init__.py
 # Central export for all invoice-related utilities
 
 from .invoice_data import (
