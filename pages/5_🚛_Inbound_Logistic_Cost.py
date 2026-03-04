@@ -15,10 +15,6 @@ from utils.inbound_cost import (
     get_recent_costs,
     get_filter_options,
     CostService,
-    get_cost_trend_monthly,
-    get_cost_by_courier,
-    get_cost_by_charge_type,
-    get_cost_by_warehouse,
 )
 from utils.inbound_cost.cost_dialogs import (
     create_cost_dialog,
@@ -303,140 +299,212 @@ def _list_fragment():
 
 @st.fragment
 def _analytics_fragment():
-    period_col, _ = st.columns([1, 3])
-    with period_col:
+    # ── Period selector ───────────────────────────────────────────────────────
+    p_col1, p_col2, p_col3 = st.columns([2, 2, 4])
+    with p_col1:
         period = st.selectbox(
             "Period",
-            ["Last 3 months", "Last 6 months", "Last 12 months", "All Time"],
+            ["Last 3 months", "Last 6 months", "Last 12 months", "All Time", "Custom…"],
             key="cost_period",
         )
+    # Custom date pickers — react immediately (no form)
+    date_from = None
+    date_to   = None
+    if period == "Custom…":
+        with p_col2:
+            date_from = st.date_input(
+                "From",
+                key="ap_date_from",
+                value=(datetime.now() - timedelta(days=90)).date(),
+            )
+        with p_col3:
+            date_to = st.date_input(
+                "To",
+                key="ap_date_to",
+                value=datetime.now().date(),
+            )
 
-    months_map = {"Last 3 months": 3, "Last 6 months": 6,
-                  "Last 12 months": 12, "All Time": 9999}
-    months_back = months_map[period]
+    # ── Derive cutoff and filter raw_df (single source of truth) ─────────────
+    raw_df = get_recent_costs(limit=5000)
 
-    # Data
-    trend_df   = get_cost_trend_monthly()
-    courier_df = get_cost_by_courier()
-    charge_df  = get_cost_by_charge_type()
-    wh_df      = get_cost_by_warehouse()
+    if raw_df.empty:
+        st.info("No data available.")
+        return
 
-    # Filter trend by period
-    if not trend_df.empty and months_back < 9999:
-        from datetime import date as _date
-        today = _date.today()
-        y, m = today.year, today.month - months_back
-        while m <= 0:
-            y -= 1; m += 12
-        trend_df = trend_df[
-            (trend_df["arrival_year"] > y)
-            | ((trend_df["arrival_year"] == y) & (trend_df["arrival_month"] >= m))
-        ]
+    df = raw_df.copy()
+    df["arrival_date"] = pd.to_datetime(df["arrival_date"])
 
-    # KPIs from full list
-    raw_df = get_recent_costs(limit=2000)
-    if not raw_df.empty:
-        m_df = raw_df.copy()
-        if months_back < 9999:
-            m_df["arrival_date"] = pd.to_datetime(m_df["arrival_date"])
-            cutoff = pd.Timestamp.now() - timedelta(days=months_back * 30)
-            m_df = m_df[m_df["arrival_date"] >= cutoff]
-        kpis = CostService.compute_kpis(m_df)
-    else:
-        kpis = CostService.compute_kpis(pd.DataFrame())
+    if period == "Custom…":
+        if date_from:
+            df = df[df["arrival_date"] >= pd.Timestamp(date_from)]
+        if date_to:
+            df = df[df["arrival_date"] <= pd.Timestamp(date_to) + timedelta(days=1) - timedelta(seconds=1)]
+    elif period != "All Time":
+        months_map = {"Last 3 months": 3, "Last 6 months": 6, "Last 12 months": 12}
+        months_back = months_map[period]
+        cutoff = pd.Timestamp.now() - timedelta(days=months_back * 30)
+        df = df[df["arrival_date"] >= cutoff]
+
+    if df.empty:
+        st.info("No data for the selected period.")
+        return
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    kpis = CostService.compute_kpis(df)
+    intl_pct  = (kpis["intl_usd"]  / kpis["total_usd"] * 100) if kpis["total_usd"] else 0
+    local_pct = (kpis["local_usd"] / kpis["total_usd"] * 100) if kpis["total_usd"] else 0
 
     st.markdown("### 📊 Key Metrics")
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Total Entries",    f"{kpis['total_entries']:,}")
-    k2.metric("Unique CANs",      f"{kpis['unique_cans']:,}")
-    k3.metric("Total (USD)",      f"${kpis['total_usd']:,.0f}")
-    k4.metric("International",    f"${kpis['intl_usd']:,.0f}")
-    k5.metric("Local",            f"${kpis['local_usd']:,.0f}")
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Total Entries",   f"{kpis['total_entries']:,}")
+    k2.metric("Unique CANs",     f"{kpis['unique_cans']:,}")
+    k3.metric("Total (USD)",     f"${kpis['total_usd']:,.0f}")
+    k4.metric("International",   f"${kpis['intl_usd']:,.0f}",   delta=f"{intl_pct:.1f}%",  delta_color="off")
+    k5.metric("Local",           f"${kpis['local_usd']:,.0f}",  delta=f"{local_pct:.1f}%", delta_color="off")
+    k6.metric("Unique Couriers", f"{kpis['unique_couriers']:,}")
 
     st.markdown("---")
 
-    # ── Row 1: Trend + Category split ─────────────────────────────────────────
+    # ── Pre-compute reusable groupings ────────────────────────────────────────
+    df["month_label"] = df["arrival_date"].dt.to_period("M").astype(str)
+    df["amount_usd"]  = pd.to_numeric(df["amount_usd"], errors="coerce").fillna(0)
+
+    # ── Row 1: Trend + INTL/LOCAL split ───────────────────────────────────────
     tr_col, cat_col = st.columns(2)
 
     with tr_col:
         st.markdown("#### 📈 Monthly Cost Trend (USD)")
-        if not trend_df.empty:
-            pivot = (
-                trend_df.groupby(["month_label", "category"])["total_usd"]
-                .sum().unstack(fill_value=0).sort_index()
-            )
-            st.bar_chart(pivot, width="stretch")
+        trend_pivot = (
+            df.groupby(["month_label", "category"])["amount_usd"]
+            .sum().unstack(fill_value=0)
+        )
+        # Sort chronologically
+        trend_pivot = trend_pivot.sort_index()
+        if not trend_pivot.empty:
+            # Colour map: INTERNATIONAL=blue, LOCAL=green
+            st.bar_chart(trend_pivot, width="stretch",
+                         color=["#1f77b4", "#2ca02c"] if len(trend_pivot.columns) == 2 else None)
         else:
-            st.caption("No trend data available.")
+            st.caption("No trend data.")
 
     with cat_col:
-        st.markdown("#### 🔵 INTL vs 🟢 LOCAL Breakdown")
-        if not charge_df.empty:
-            cat_tbl = (
-                charge_df.groupby(["logistic_charge", "category"])["total_usd"]
-                .sum().reset_index()
-                .sort_values("total_usd", ascending=False)
-                .head(15)
-            )
-            cat_tbl["total_usd"] = cat_tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
-            cat_tbl.columns = ["Charge Type", "Category", "Total USD"]
+        st.markdown("#### 🔵 INTL vs 🟢 LOCAL — Charge Breakdown")
+        cat_tbl = (
+            df.groupby(["logistic_charge", "category"])["amount_usd"]
+            .sum().reset_index()
+            .sort_values("amount_usd", ascending=False)
+            .head(15)
+        )
+        if not cat_tbl.empty:
+            # Add % of total
+            cat_tbl["pct"] = (cat_tbl["amount_usd"] / cat_tbl["amount_usd"].sum() * 100).round(1)
+            cat_tbl["Total USD"] = cat_tbl["amount_usd"].apply(lambda x: f"${x:,.0f}")
+            cat_tbl["Share"]     = cat_tbl["pct"].apply(lambda x: f"{x:.1f}%")
+            cat_tbl = cat_tbl[["logistic_charge", "category", "Total USD", "Share"]]
+            cat_tbl.columns = ["Charge Type", "Category", "Total USD", "Share"]
             st.dataframe(cat_tbl, width="stretch", hide_index=True)
 
     st.markdown("---")
 
-    # ── Row 2: Courier + Warehouse ────────────────────────────────────────────
+    # ── Row 2: Courier bar + Courier detail table ─────────────────────────────
     cour_col, wh_col = st.columns(2)
 
     with cour_col:
         st.markdown("#### 🚚 Top Couriers (USD)")
-        if not courier_df.empty:
-            top = (
-                courier_df.groupby("courier")["total_usd"]
-                .sum().sort_values(ascending=False).head(12).reset_index()
+        courier_agg = (
+            df.groupby(["courier", "category"])
+            .agg(total_usd=("amount_usd", "sum"), entries=("cost_id", "count"))
+            .reset_index()
+        )
+        courier_total = (
+            courier_agg.groupby("courier")["total_usd"]
+            .sum().sort_values(ascending=False).head(10).reset_index()
+        )
+        if not courier_total.empty:
+            # Stacked bar by category
+            courier_pivot = (
+                courier_agg[courier_agg["courier"].isin(courier_total["courier"])]
+                .pivot_table(index="courier", columns="category", values="total_usd", fill_value=0)
+                .loc[courier_total["courier"]]   # keep sort order
             )
-            top.columns = ["Courier", "Total USD"]
-            st.bar_chart(top.set_index("Courier"), width="stretch")
+            st.bar_chart(courier_pivot, width="stretch",
+                         color=["#1f77b4", "#2ca02c"] if len(courier_pivot.columns) == 2 else None)
 
-            tbl = (
-                courier_df.groupby(["courier", "category"])
-                .agg(total_usd=("total_usd", "sum"), entries=("entry_count", "sum"))
-                .reset_index().sort_values("total_usd", ascending=False).head(20)
-            )
+            tbl = courier_agg.sort_values("total_usd", ascending=False).head(20).copy()
+            tbl["Avg/Entry"] = (tbl["total_usd"] / tbl["entries"].replace(0, 1)).apply(lambda x: f"${x:,.0f}")
             tbl["total_usd"] = tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
-            tbl.columns = ["Courier", "Category", "Total USD", "Entries"]
+            tbl.columns = ["Courier", "Category", "Total USD", "Entries", "Avg/Entry"]
             st.dataframe(tbl, width="stretch", hide_index=True)
         else:
             st.caption("No courier data.")
 
     with wh_col:
         st.markdown("#### 🏭 Cost by Warehouse")
-        if not wh_df.empty:
-            wh_top = (
-                wh_df.groupby("warehouse")["total_usd"]
-                .sum().sort_values(ascending=False).reset_index()
+        wh_agg = (
+            df.groupby(["warehouse_name", "category"])
+            .agg(total_usd=("amount_usd", "sum"), entries=("cost_id", "count"))
+            .reset_index().rename(columns={"warehouse_name": "warehouse"})
+        )
+        wh_total = (
+            wh_agg.groupby("warehouse")["total_usd"]
+            .sum().sort_values(ascending=False).reset_index()
+        )
+        if not wh_total.empty:
+            wh_pivot = (
+                wh_agg.pivot_table(index="warehouse", columns="category",
+                                   values="total_usd", fill_value=0)
+                .loc[wh_total["warehouse"]]
             )
-            wh_top.columns = ["Warehouse", "Total USD"]
-            st.bar_chart(wh_top.set_index("Warehouse"), width="stretch")
+            st.bar_chart(wh_pivot, width="stretch",
+                         color=["#1f77b4", "#2ca02c"] if len(wh_pivot.columns) == 2 else None)
 
-            wh_tbl = wh_df.sort_values("total_usd", ascending=False).head(20).copy()
+            wh_tbl = wh_total.copy()
             wh_tbl["total_usd"] = wh_tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
-            wh_tbl.columns = [c.replace("_", " ").title() for c in wh_tbl.columns]
+            wh_tbl.columns = ["Warehouse", "Total USD"]
             st.dataframe(wh_tbl, width="stretch", hide_index=True)
         else:
             st.caption("No warehouse data.")
 
     st.markdown("---")
 
-    # ── Row 3: Charge type table ───────────────────────────────────────────────
-    st.markdown("#### 📋 Charge Type Detail")
-    if not charge_df.empty:
-        tbl = charge_df.copy().sort_values("total_usd", ascending=False)
-        tbl["total_usd"]        = tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
-        tbl["avg_cost_per_unit"] = tbl["avg_cost_per_unit"].apply(
-            lambda x: f"${x:,.6f}" if pd.notna(x) else "—"
+    # ── Row 3: Charge Type detail + Cost per Unit ─────────────────────────────
+    chg_col, cpu_col = st.columns(2)
+
+    with chg_col:
+        st.markdown("#### 📋 Charge Type Detail")
+        charge_agg = (
+            df.groupby(["logistic_charge", "category"])
+            .agg(
+                entries       =("cost_id",           "count"),
+                total_usd     =("amount_usd",         "sum"),
+                avg_cpu       =("cost_per_unit_usd",  "mean"),
+            )
+            .reset_index().sort_values("total_usd", ascending=False)
         )
-        tbl.columns = ["Charge Type", "Category", "Entries", "Total USD", "Avg $/Unit"]
-        st.dataframe(tbl, width="stretch", hide_index=True)
+        if not charge_agg.empty:
+            charge_agg["pct"] = (charge_agg["total_usd"] / charge_agg["total_usd"].sum() * 100).round(1)
+            charge_agg["Total USD"]  = charge_agg["total_usd"].apply(lambda x: f"${x:,.0f}")
+            charge_agg["Share"]      = charge_agg["pct"].apply(lambda x: f"{x:.1f}%")
+            charge_agg["Avg $/Unit"] = charge_agg["avg_cpu"].apply(
+                lambda x: f"${x:,.6f}" if pd.notna(x) and x > 0 else "—"
+            )
+            disp = charge_agg[["logistic_charge", "category", "entries", "Total USD", "Share", "Avg $/Unit"]]
+            disp.columns = ["Charge Type", "Category", "Entries", "Total USD", "Share", "Avg $/Unit"]
+            st.dataframe(disp, width="stretch", hide_index=True)
+
+    with cpu_col:
+        st.markdown("#### 💰 Cost per Unit Trend (USD)")
+        cpu_df = (
+            df[df["cost_per_unit_usd"].notna() & (df["cost_per_unit_usd"] > 0)]
+            .groupby(["month_label", "category"])["cost_per_unit_usd"]
+            .mean().unstack(fill_value=0).sort_index()
+        )
+        if not cpu_df.empty:
+            st.line_chart(cpu_df, width="stretch",
+                          color=["#1f77b4", "#2ca02c"] if len(cpu_df.columns) == 2 else None)
+            st.caption("Avg cost per unit (USD) by month. Useful for tracking freight efficiency over time.")
+        else:
+            st.caption("No cost-per-unit data available.")
 
 
 # ============================================================================
