@@ -10,6 +10,9 @@ import pandas as pd
 import logging
 from typing import Dict, List, Optional
 
+# ── Module-level constants (must be defined before use in any function) ───────
+ALLOWED_EXTENSIONS_DISPLAY = ["pdf", "png", "jpg", "jpeg"]
+
 from .cost_data import (
     get_cost_by_id,
     get_cost_type_options,
@@ -61,8 +64,28 @@ def _keycloak_id(user) -> str:
 
 
 def _invalidate_cache():
-    """Signal main page to clear cost list cache on next render."""
-    st.session_state["_invalidate_cost_cache"] = True
+    """
+    Clear all cost-related @st.cache_data caches immediately.
+    Direct clearing avoids the previous flag mechanism which required
+    an extra full-page rerun to take effect.
+    """
+    from .cost_data import (          # noqa: PLC0415
+        get_recent_costs, get_filter_options,
+        get_cost_trend_monthly, get_cost_by_courier,
+        get_cost_by_charge_type, get_cost_by_warehouse,
+        get_cost_type_options, get_arrival_options,
+    )
+    for fn in (
+        get_recent_costs, get_filter_options,
+        get_cost_trend_monthly, get_cost_by_courier,
+        get_cost_by_charge_type, get_cost_by_warehouse,
+        get_cost_type_options, get_arrival_options,
+    ):
+        fn.clear()
+    # Also clear dialog-level caches
+    _cached_cost_types.clear()
+    _cached_arrivals.clear()
+    _cached_vendors.clear()
 
 
 def _fmt(amount, currency="") -> str:
@@ -403,10 +426,6 @@ def create_cost_dialog():
             st.rerun()
 
 
-# ── constant used in the dialog (avoids import at module level) ───────────────
-ALLOWED_EXTENSIONS_DISPLAY = ["pdf", "png", "jpg", "jpeg"]
-
-
 # ============================================================================
 # EDIT DIALOG
 # ============================================================================
@@ -456,8 +475,8 @@ def edit_cost_dialog(cost_id: int):
         with ac:
             new_amount = st.number_input(
                 "Amount *",
-                value=max(float(entry.get("amount") or 0.0), 0.0),
-                min_value=0.0, step=0.01, format="%.2f",
+                value=max(float(entry.get("amount") or 0.01), 0.01),
+                min_value=0.01, step=0.01, format="%.2f",
                 key="ec_amount",
             )
         with cc:

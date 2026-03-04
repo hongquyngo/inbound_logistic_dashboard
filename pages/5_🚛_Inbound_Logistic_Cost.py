@@ -52,26 +52,6 @@ class CostPageState:
 def _init_state():
     if "cost_state" not in st.session_state:
         st.session_state.cost_state = CostPageState()
-    if "show_create_cost_dialog" not in st.session_state:
-        st.session_state.show_create_cost_dialog = False
-
-
-# ============================================================================
-# CACHE MANAGEMENT  (same pattern as Vendor Invoice)
-# ============================================================================
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _load_costs(limit: int = 500) -> pd.DataFrame:
-    return get_recent_costs(limit=limit)
-
-
-def _maybe_invalidate():
-    if st.session_state.pop("_invalidate_cost_cache", False):
-        _load_costs.clear()
-        get_cost_trend_monthly.clear()
-        get_cost_by_courier.clear()
-        get_cost_by_charge_type.clear()
-        get_cost_by_warehouse.clear()
 
 
 # ============================================================================
@@ -81,7 +61,6 @@ def _maybe_invalidate():
 def main():
     _init_state()
     AuthManager().require_auth()
-    _maybe_invalidate()
 
     # Recover signals written by dialogs
     state = st.session_state.cost_state
@@ -117,8 +96,7 @@ def _header_fragment():
     with btn_col:
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
-            st.session_state.show_create_cost_dialog = True
-            st.rerun(scope="fragment")
+            create_cost_dialog()
 
     if state.last_created_cost:
         c = state.last_created_cost
@@ -133,10 +111,6 @@ def _header_fragment():
         st.info(f"🗑️ Cost entry #{state.last_deleted_cost} deleted.")
         state.last_deleted_cost = None
 
-    if st.session_state.show_create_cost_dialog:
-        create_cost_dialog()
-        st.session_state.show_create_cost_dialog = False
-
 
 # ============================================================================
 # LIST FRAGMENT
@@ -146,53 +120,116 @@ def _header_fragment():
 def _list_fragment():
     state = st.session_state.cost_state
 
-    # ── Filters ───────────────────────────────────────────────────────────────
+    # ── Pre-load data so CAN# options can be derived from it ─────────────────
+    _limit = st.session_state.get("cf_limit", 500)
+    raw_df = get_recent_costs(limit=int(_limit))
+    opts   = get_filter_options()
+
+    # ── Filters (no st.form — widgets react immediately within fragment) ──────
     with st.expander("🔍 Search & Filters", expanded=True):
-        with st.form("cost_filter_form", border=False):
-            fc1, fc2, fc3, fc4 = st.columns(4)
 
-            with fc1:
-                date_filter = st.selectbox(
-                    "Date Range",
-                    ["Last 30 days", "Last 90 days", "Last 6 months",
-                     "This Year", "All Time"],
-                    key="cf_date",
+        # Row 1: Date range + Max Records
+        rc1, rc2 = st.columns([3, 1])
+        with rc1:
+            date_filter = st.selectbox(
+                "Date Range",
+                ["Last 30 days", "Last 90 days", "Last 6 months",
+                 "This Year", "All Time", "Custom…"],
+                key="cf_date",
+            )
+        with rc2:
+            limit = st.number_input(
+                "Max Records",
+                min_value=50, max_value=2000, value=500, step=50, key="cf_limit"
+            )
+
+        # Custom date pickers — shown immediately when "Custom…" is selected
+        custom_from = None
+        custom_to   = None
+        if date_filter == "Custom…":
+            cd1, cd2, _ = st.columns([2, 2, 2])
+            with cd1:
+                custom_from = st.date_input(
+                    "From date",
+                    key="cf_custom_from",
+                    value=(datetime.now() - timedelta(days=30)).date(),
                 )
-            with fc2:
-                can_search    = st.text_input("CAN #",       placeholder="Search…", key="cf_can")
-                charge_search = st.text_input("Charge Type", placeholder="Search…", key="cf_charge")
-            with fc3:
-                opts = _cached_filter_opts()
-                category_filter = st.selectbox(
-                    "Category", ["All", "INTERNATIONAL", "LOCAL"], key="cf_category"
-                )
-                courier_filter = st.selectbox(
-                    "Courier", ["All"] + opts.get("couriers", []), key="cf_courier"
-                )
-            with fc4:
-                warehouse_filter = st.selectbox(
-                    "Warehouse", ["All"] + opts.get("warehouses", []), key="cf_warehouse"
-                )
-                limit = st.number_input(
-                    "Max Records",
-                    min_value=50, max_value=2000, value=500, step=50, key="cf_limit"
+            with cd2:
+                custom_to = st.date_input(
+                    "To date",
+                    key="cf_custom_to",
+                    value=datetime.now().date(),
                 )
 
-            fa, _, fb = st.columns([1, 4, 1])
-            with fa:
-                st.form_submit_button("🔍 Apply", width="stretch")
-            with fb:
-                if st.form_submit_button("🔄 Reset", width="stretch"):
-                    for k in ["cf_date", "cf_can", "cf_charge",
-                              "cf_category", "cf_courier", "cf_warehouse"]:
-                        st.session_state.pop(k, None)
-                    st.rerun(scope="fragment")
+        # Row 2: CAN # multiselect + Charge Type
+        rm1, rm2 = st.columns(2)
+        with rm1:
+            can_options = (
+                sorted(raw_df["can_number"].dropna().unique().tolist())
+                if not raw_df.empty else []
+            )
+            can_filter = st.multiselect(
+                "CAN #",
+                options=can_options,
+                default=[],
+                key="cf_can",
+                placeholder="All CAN numbers",
+            )
+        with rm2:
+            charge_filter = st.multiselect(
+                "Charge Type",
+                options=opts.get("charge_types", []),
+                default=[],
+                key="cf_charge",
+                placeholder="All charge types",
+            )
 
-    # ── Load + filter ─────────────────────────────────────────────────────────
-    raw_df = _load_costs(int(limit))
-    df     = _apply_filters(
-        raw_df, date_filter, can_search, charge_search,
-        category_filter, courier_filter, warehouse_filter,
+        # Row 3: Category + Courier + Warehouse
+        fm1, fm2, fm3 = st.columns(3)
+        with fm1:
+            category_filter = st.multiselect(
+                "Category",
+                options=["INTERNATIONAL", "LOCAL"],
+                default=[],
+                key="cf_category",
+                placeholder="All categories",
+            )
+        with fm2:
+            courier_filter = st.multiselect(
+                "Courier",
+                options=opts.get("couriers", []),
+                default=[],
+                key="cf_courier",
+                placeholder="All couriers",
+            )
+        with fm3:
+            warehouse_filter = st.multiselect(
+                "Warehouse",
+                options=opts.get("warehouses", []),
+                default=[],
+                key="cf_warehouse",
+                placeholder="All warehouses",
+            )
+
+        # Reset button
+        _, reset_col = st.columns([5, 1])
+        with reset_col:
+            if st.button("🔄 Reset", width="stretch", key="cf_reset"):
+                for k in ["cf_date", "cf_can", "cf_charge", "cf_category",
+                          "cf_courier", "cf_warehouse",
+                          "cf_custom_from", "cf_custom_to", "cf_limit"]:
+                    st.session_state.pop(k, None)
+                st.rerun(scope="fragment")
+
+    # Reload if limit changed
+    if int(limit) != int(_limit):
+        raw_df = get_recent_costs(limit=int(limit))
+
+    # ── Apply filters ─────────────────────────────────────────────────────────
+    df = _apply_filters(
+        raw_df, date_filter, can_filter,
+        charge_filter, category_filter, courier_filter, warehouse_filter,
+        custom_from=custom_from, custom_to=custom_to,
     )
 
     # ── Summary metrics ───────────────────────────────────────────────────────
@@ -245,30 +282,17 @@ def _list_fragment():
 
         ac1, ac2, ac3, ac4, _ = st.columns([1, 1, 1, 1, 3])
         with ac1:
-            if st.button("👁️ View",        width="stretch", key="cost_view"):
-                st.session_state["_cost_dlg"] = ("view", sel_id)
-                st.rerun(scope="fragment")
+            if st.button("👁️ View",       width="stretch", key="cost_view"):
+                view_cost_dialog(sel_id)
         with ac2:
-            if st.button("✏️ Edit",         width="stretch", key="cost_edit"):
-                st.session_state["_cost_dlg"] = ("edit", sel_id)
-                st.rerun(scope="fragment")
+            if st.button("✏️ Edit",        width="stretch", key="cost_edit"):
+                edit_cost_dialog(sel_id)
         with ac3:
-            if st.button("📎 Attachments",  width="stretch", key="cost_att"):
-                st.session_state["_cost_dlg"] = ("attachments", sel_id)
-                st.rerun(scope="fragment")
+            if st.button("📎 Attachments", width="stretch", key="cost_att"):
+                attachments_dialog(sel_id)
         with ac4:
-            if st.button("🗑️ Delete",       width="stretch", key="cost_delete"):
-                st.session_state["_cost_dlg"] = ("delete", sel_id)
-                st.rerun(scope="fragment")
-
-    # ── Dispatch dialogs ──────────────────────────────────────────────────────
-    dlg = st.session_state.pop("_cost_dlg", None)
-    if dlg:
-        action, cost_id = dlg
-        if   action == "view":        view_cost_dialog(cost_id)
-        elif action == "edit":        edit_cost_dialog(cost_id)
-        elif action == "delete":      delete_cost_dialog(cost_id)
-        elif action == "attachments": attachments_dialog(cost_id)
+            if st.button("🗑️ Delete",      width="stretch", key="cost_delete"):
+                delete_cost_dialog(sel_id)
 
     _show_export(disp)
 
@@ -299,9 +323,8 @@ def _analytics_fragment():
 
     # Filter trend by period
     if not trend_df.empty and months_back < 9999:
-        import calendar
-        from datetime import date
-        today = date.today()
+        from datetime import date as _date
+        today = _date.today()
         y, m = today.year, today.month - months_back
         while m <= 0:
             y -= 1; m += 12
@@ -311,7 +334,7 @@ def _analytics_fragment():
         ]
 
     # KPIs from full list
-    raw_df = _load_costs(2000)
+    raw_df = get_recent_costs(limit=2000)
     if not raw_df.empty:
         m_df = raw_df.copy()
         if months_back < 9999:
@@ -420,45 +443,49 @@ def _analytics_fragment():
 # HELPERS
 # ============================================================================
 
-@st.cache_data(ttl=300, show_spinner=False)
-def _cached_filter_opts() -> dict:
-    return get_filter_options()
-
-
 def _apply_filters(
     df: pd.DataFrame,
     date_filter:      str,
-    can_search:       str,
-    charge_search:    str,
-    category_filter:  str,
-    courier_filter:   str,
-    warehouse_filter: str,
+    can_filter:       list,      # multiselect → list (empty = all)
+    charge_filter:    list,
+    category_filter:  list,
+    courier_filter:   list,
+    warehouse_filter: list,
+    custom_from=None,
+    custom_to=None,
 ) -> pd.DataFrame:
     if df.empty:
         return df
 
-    if date_filter != "All Time" and "arrival_date" in df.columns:
+    if "arrival_date" in df.columns:
         df = df.copy()
         df["arrival_date"] = pd.to_datetime(df["arrival_date"])
         today = pd.Timestamp.now()
-        thresholds = {
-            "Last 30 days": 30, "Last 90 days": 90, "Last 6 months": 180,
-        }
-        if date_filter == "This Year":
-            df = df[df["arrival_date"].dt.year == today.year]
-        elif date_filter in thresholds:
-            df = df[df["arrival_date"] >= today - timedelta(days=thresholds[date_filter])]
 
-    if can_search:
-        df = df[df["can_number"].str.contains(can_search, case=False, na=False)]
-    if charge_search:
-        df = df[df["logistic_charge"].str.contains(charge_search, case=False, na=False)]
-    if category_filter != "All":
-        df = df[df["category"] == category_filter]
-    if courier_filter != "All":
-        df = df[df["courier"] == courier_filter]
-    if warehouse_filter != "All":
-        df = df[df["warehouse_name"] == warehouse_filter]
+        if date_filter == "Custom…":
+            if custom_from:
+                df = df[df["arrival_date"] >= pd.Timestamp(custom_from)]
+            if custom_to:
+                df = df[df["arrival_date"] <= pd.Timestamp(custom_to) + timedelta(days=1) - timedelta(seconds=1)]
+        elif date_filter != "All Time":
+            thresholds = {
+                "Last 30 days": 30, "Last 90 days": 90, "Last 6 months": 180,
+            }
+            if date_filter == "This Year":
+                df = df[df["arrival_date"].dt.year == today.year]
+            elif date_filter in thresholds:
+                df = df[df["arrival_date"] >= today - timedelta(days=thresholds[date_filter])]
+
+    if can_filter:
+        df = df[df["can_number"].isin(can_filter)]
+    if charge_filter:
+        df = df[df["logistic_charge"].isin(charge_filter)]
+    if category_filter:
+        df = df[df["category"].isin(category_filter)]
+    if courier_filter:
+        df = df[df["courier"].isin(courier_filter)]
+    if warehouse_filter:
+        df = df[df["warehouse_name"].isin(warehouse_filter)]
 
     return df
 
