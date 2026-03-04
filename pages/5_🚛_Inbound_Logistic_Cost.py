@@ -116,7 +116,7 @@ def _header_fragment():
         )
     with btn_col:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("➕ Add Cost Entry", type="primary", use_container_width=True):
+        if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
             st.session_state.show_create_cost_dialog = True
             st.rerun(scope="fragment")
 
@@ -180,9 +180,9 @@ def _list_fragment():
 
             fa, _, fb = st.columns([1, 4, 1])
             with fa:
-                st.form_submit_button("🔍 Apply", use_container_width=True)
+                st.form_submit_button("🔍 Apply", width="stretch")
             with fb:
-                if st.form_submit_button("🔄 Reset", use_container_width=True):
+                if st.form_submit_button("🔄 Reset", width="stretch"):
                     for k in ["cf_date", "cf_can", "cf_charge",
                               "cf_category", "cf_courier", "cf_warehouse"]:
                         st.session_state.pop(k, None)
@@ -208,7 +208,7 @@ def _list_fragment():
     # ── Dataframe with row selection ──────────────────────────────────────────
     event = st.dataframe(
         disp.drop(columns=["cost_id"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         selection_mode="single-row",
         on_select="rerun",
@@ -239,25 +239,25 @@ def _list_fragment():
         with info_col:
             st.markdown(f"**Selected:** CAN `{sel_can}` — entry `#{sel_id}`")
         with clear_col:
-            if st.button("✖ Clear", use_container_width=True, key="cost_clear"):
+            if st.button("✖ Clear", width="stretch", key="cost_clear"):
                 state._table_key += 1
                 st.rerun(scope="fragment")
 
         ac1, ac2, ac3, ac4, _ = st.columns([1, 1, 1, 1, 3])
         with ac1:
-            if st.button("👁️ View",        use_container_width=True, key="cost_view"):
+            if st.button("👁️ View",        width="stretch", key="cost_view"):
                 st.session_state["_cost_dlg"] = ("view", sel_id)
                 st.rerun(scope="fragment")
         with ac2:
-            if st.button("✏️ Edit",         use_container_width=True, key="cost_edit"):
+            if st.button("✏️ Edit",         width="stretch", key="cost_edit"):
                 st.session_state["_cost_dlg"] = ("edit", sel_id)
                 st.rerun(scope="fragment")
         with ac3:
-            if st.button("📎 Attachments",  use_container_width=True, key="cost_att"):
+            if st.button("📎 Attachments",  width="stretch", key="cost_att"):
                 st.session_state["_cost_dlg"] = ("attachments", sel_id)
                 st.rerun(scope="fragment")
         with ac4:
-            if st.button("🗑️ Delete",       use_container_width=True, key="cost_delete"):
+            if st.button("🗑️ Delete",       width="stretch", key="cost_delete"):
                 st.session_state["_cost_dlg"] = ("delete", sel_id)
                 st.rerun(scope="fragment")
 
@@ -342,7 +342,7 @@ def _analytics_fragment():
                 trend_df.groupby(["month_label", "category"])["total_usd"]
                 .sum().unstack(fill_value=0).sort_index()
             )
-            st.bar_chart(pivot, use_container_width=True)
+            st.bar_chart(pivot, width="stretch")
         else:
             st.caption("No trend data available.")
 
@@ -357,7 +357,7 @@ def _analytics_fragment():
             )
             cat_tbl["total_usd"] = cat_tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
             cat_tbl.columns = ["Charge Type", "Category", "Total USD"]
-            st.dataframe(cat_tbl, use_container_width=True, hide_index=True)
+            st.dataframe(cat_tbl, width="stretch", hide_index=True)
 
     st.markdown("---")
 
@@ -372,7 +372,7 @@ def _analytics_fragment():
                 .sum().sort_values(ascending=False).head(12).reset_index()
             )
             top.columns = ["Courier", "Total USD"]
-            st.bar_chart(top.set_index("Courier"), use_container_width=True)
+            st.bar_chart(top.set_index("Courier"), width="stretch")
 
             tbl = (
                 courier_df.groupby(["courier", "category"])
@@ -381,7 +381,7 @@ def _analytics_fragment():
             )
             tbl["total_usd"] = tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
             tbl.columns = ["Courier", "Category", "Total USD", "Entries"]
-            st.dataframe(tbl, use_container_width=True, hide_index=True)
+            st.dataframe(tbl, width="stretch", hide_index=True)
         else:
             st.caption("No courier data.")
 
@@ -393,12 +393,12 @@ def _analytics_fragment():
                 .sum().sort_values(ascending=False).reset_index()
             )
             wh_top.columns = ["Warehouse", "Total USD"]
-            st.bar_chart(wh_top.set_index("Warehouse"), use_container_width=True)
+            st.bar_chart(wh_top.set_index("Warehouse"), width="stretch")
 
             wh_tbl = wh_df.sort_values("total_usd", ascending=False).head(20).copy()
             wh_tbl["total_usd"] = wh_tbl["total_usd"].apply(lambda x: f"${x:,.0f}")
             wh_tbl.columns = [c.replace("_", " ").title() for c in wh_tbl.columns]
-            st.dataframe(wh_tbl, use_container_width=True, hide_index=True)
+            st.dataframe(wh_tbl, width="stretch", hide_index=True)
         else:
             st.caption("No warehouse data.")
 
@@ -413,7 +413,7 @@ def _analytics_fragment():
             lambda x: f"${x:,.6f}" if pd.notna(x) else "—"
         )
         tbl.columns = ["Charge Type", "Category", "Entries", "Total USD", "Avg $/Unit"]
-        st.dataframe(tbl, use_container_width=True, hide_index=True)
+        st.dataframe(tbl, width="stretch", hide_index=True)
 
 
 # ============================================================================
@@ -488,13 +488,13 @@ def _show_export(df: pd.DataFrame):
             "📊 Excel", data=buf.getvalue(),
             file_name=f"inbound_costs_{ts}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
     with ec2:
         st.download_button(
             "📄 CSV", data=df.to_csv(index=False),
             file_name=f"inbound_costs_{ts}.csv",
-            mime="text/csv", use_container_width=True,
+            mime="text/csv", width="stretch",
         )
 
 
