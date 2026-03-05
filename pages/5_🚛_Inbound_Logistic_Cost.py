@@ -26,6 +26,15 @@ from utils.inbound_cost.cost_dialogs import (
 
 logger = logging.getLogger(__name__)
 
+# ── Roles allowed to mutate cost entries ─────────────────────────────────────
+_WRITE_ROLES = {"admin", "inbound_manager", "supply_chain"}
+
+
+def _can_write() -> bool:
+    """Return True if the current user has create/edit/delete permission."""
+    role = st.session_state.get("user_role", "")
+    return role in _WRITE_ROLES
+
 st.set_page_config(
     page_title="Inbound Logistic Cost",
     page_icon="🚛",
@@ -91,8 +100,12 @@ def _header_fragment():
         )
     with btn_col:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
-            create_cost_dialog()
+        if _can_write():
+            if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
+                create_cost_dialog()
+        else:
+            st.button("➕ Add Cost Entry", type="primary", width="stretch", disabled=True,
+                      help="🔒 Requires admin, inbound_manager, or supply_chain role.")
 
     if state.last_created_cost:
         c = state.last_created_cost
@@ -264,12 +277,7 @@ def _list_fragment():
     # ── Action bar ────────────────────────────────────────────────────────────
     sel_rows = event.selection.rows
     if sel_rows:
-        idx = sel_rows[0]
-        # Guard against stale selection when filters reduce the table size
-        if idx >= len(disp):
-            state._table_key += 1
-            st.rerun(scope="fragment")
-            return
+        idx     = sel_rows[0]
         sel_id  = int(disp.iloc[idx]["cost_id"])
         sel_can = disp.iloc[idx].get("CAN #", "—")
 
@@ -281,19 +289,26 @@ def _list_fragment():
                 state._table_key += 1
                 st.rerun(scope="fragment")
 
-        ac1, ac2, ac3, ac4, _ = st.columns([1, 1, 1, 1, 3])
+        write_access = _can_write()
+        if write_access:
+            ac1, ac2, ac3, ac4, _ = st.columns([1, 1, 1, 1, 3])
+        else:
+            ac1, ac2, _ = st.columns([1, 1, 4])
+
         with ac1:
-            if st.button("👁️ View",       width="stretch", key="cost_view"):
+            if st.button("👁️ View", width="stretch", key="cost_view"):
                 view_cost_dialog(sel_id)
         with ac2:
-            if st.button("✏️ Edit",        width="stretch", key="cost_edit"):
-                edit_cost_dialog(sel_id)
-        with ac3:
             if st.button("📎 Attachments", width="stretch", key="cost_att"):
                 attachments_dialog(sel_id)
-        with ac4:
-            if st.button("🗑️ Delete",      width="stretch", key="cost_delete"):
-                delete_cost_dialog(sel_id)
+
+        if write_access:
+            with ac3:
+                if st.button("✏️ Edit", width="stretch", key="cost_edit"):
+                    edit_cost_dialog(sel_id)
+            with ac4:
+                if st.button("🗑️ Delete", width="stretch", key="cost_delete"):
+                    delete_cost_dialog(sel_id)
 
     _show_export(disp)
 

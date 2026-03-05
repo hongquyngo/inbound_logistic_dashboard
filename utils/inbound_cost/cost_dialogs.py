@@ -56,6 +56,26 @@ def _get_user():
         return None
 
 
+_WRITE_ROLES = {"admin", "inbound_manager", "supply_chain"}
+
+
+def _check_write_permission() -> bool:
+    """
+    Return True if current user may create/edit/delete cost entries.
+    Shows an error and returns False if permission is denied.
+    Called at the top of mutating dialogs as a server-side guard.
+    """
+    import streamlit as st
+    role = st.session_state.get("user_role", "")
+    if role in _WRITE_ROLES:
+        return True
+    st.error(
+        f"🔒 **Access denied.** Your role (`{role or 'unknown'}`) does not have permission "
+        f"to perform this action. Required: `admin`, `inbound_manager`, or `supply_chain`."
+    )
+    return False
+
+
 def _keycloak_id(user) -> str:
     if user is None:
         return "unknown"
@@ -327,6 +347,8 @@ def view_cost_dialog(cost_id: int):
 @st.dialog("➕ Add Inbound Cost Entry", width="large")
 def create_cost_dialog():
     user = _get_user()
+    if not _check_write_permission():
+        return
     st.markdown("### New Logistics Cost Entry")
     st.caption("Add an international or local charge to a Cargo Arrival Note (CAN).")
     st.markdown("---")
@@ -623,6 +645,8 @@ def create_cost_dialog():
 @st.dialog("✏️ Edit Cost Entry", width="large")
 def edit_cost_dialog(cost_id: int):
     user  = _get_user()
+    if not _check_write_permission():
+        return
     entry = get_cost_by_id(cost_id)
     if not entry:
         st.error("Cost entry not found.")
@@ -858,6 +882,8 @@ def edit_cost_dialog(cost_id: int):
 @st.dialog("🗑️ Delete Cost Entry", width="small")
 def delete_cost_dialog(cost_id: int):
     user  = _get_user()
+    if not _check_write_permission():
+        return
     entry = get_cost_by_id(cost_id)
     if not entry:
         st.error("Cost entry not found.")
