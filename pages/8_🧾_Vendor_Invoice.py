@@ -25,6 +25,16 @@ logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="Vendor Invoice", page_icon="📊", layout="wide")
 
+# ============================================================================
+# PERMISSION HELPERS
+# ============================================================================
+
+_MODIFY_ROLES = {"admin", "inbound_manager", "supply_chain"}
+
+def _can_modify() -> bool:
+    """Return True if the current user is allowed to create/edit/delete invoices."""
+    return st.session_state.get("user_role", "") in _MODIFY_ROLES
+
 
 # ============================================================================
 # STATE
@@ -113,9 +123,14 @@ def _header_fragment():
         st.title("📊 Vendor Invoice Management")
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("➕ Create Invoice", type="primary", use_container_width=True):
-            st.session_state.show_create_dialog = True
-            st.rerun(scope="fragment")
+        if _can_modify():
+            if st.button("➕ Create Invoice", type="primary", use_container_width=True):
+                st.session_state.show_create_dialog = True
+                st.rerun(scope="fragment")
+        else:
+            st.button("➕ Create Invoice", type="primary",
+                      use_container_width=True, disabled=True,
+                      help="You don't have permission to create invoices")
 
     if state.last_created_invoice:
         inv = state.last_created_invoice
@@ -230,14 +245,22 @@ def show_invoice_list():
                 st.session_state["_dlg"] = ("view", sel_id)
                 st.rerun(scope="fragment")
         with ac2:
-            if st.button("✏️ Edit", use_container_width=True, key="act_edit"):
-                st.session_state["_dlg"] = ("edit", sel_id)
-                st.rerun(scope="fragment")
+            if _can_modify():
+                if st.button("✏️ Edit", use_container_width=True, key="act_edit"):
+                    st.session_state["_dlg"] = ("edit", sel_id)
+                    st.rerun(scope="fragment")
+            else:
+                st.button("✏️ Edit", use_container_width=True, key="act_edit",
+                          disabled=True, help="You don't have permission to edit invoices")
         with ac3:
             if sel_status != "Fully Paid":
-                if st.button("🚫 Void", use_container_width=True, key="act_void"):
-                    st.session_state["_dlg"] = ("void", sel_id)
-                    st.rerun(scope="fragment")
+                if _can_modify():
+                    if st.button("🚫 Void", use_container_width=True, key="act_void"):
+                        st.session_state["_dlg"] = ("void", sel_id)
+                        st.rerun(scope="fragment")
+                else:
+                    st.button("🚫 Void", use_container_width=True, key="act_void",
+                              disabled=True, help="You don't have permission to void invoices")
 
     # ── Open dialogs from INSIDE fragment (no full-page rerun) ───────────────
     dlg = st.session_state.pop("_dlg", None)

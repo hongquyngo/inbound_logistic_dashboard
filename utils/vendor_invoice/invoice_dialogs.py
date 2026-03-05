@@ -22,6 +22,30 @@ from utils.vendor_invoice import (
 
 logger = logging.getLogger(__name__)
 
+# ============================================================================
+# PERMISSION HELPERS
+# ============================================================================
+
+_MODIFY_ROLES = {"admin", "inbound_manager", "supply_chain"}
+
+def _can_modify() -> bool:
+    """Return True if the current user may create/edit/delete invoices."""
+    return st.session_state.get("user_role", "") in _MODIFY_ROLES
+
+def _require_modify_permission() -> bool:
+    """
+    Show an error and return False if the user lacks write permission.
+    Call at the top of any write-capable dialog.
+    """
+    if not _can_modify():
+        st.error("🚫 You don't have permission to perform this action. "
+                 "Required roles: admin, inbound_manager, supply_chain.")
+        if st.button("Close", key="perm_close"):
+            st.rerun()
+        st.stop()
+        return False
+    return True
+
 
 # ============================================================================
 # CACHED DB CALLS — avoid hitting DB on every dialog rerun
@@ -61,6 +85,7 @@ def _invalidate_cache():
 
 @st.dialog("📄 Create Purchase Invoice", width="large")
 def create_invoice_dialog():
+    _require_modify_permission()
     from utils.vendor_invoice import InvoiceService
     state = _state()
     service = InvoiceService()
@@ -822,6 +847,7 @@ def view_invoice_dialog(invoice_id: int):
 
 @st.dialog("✏️ Edit Invoice", width="large")
 def edit_invoice_dialog(invoice_id: int):
+    _require_modify_permission()
     inv = get_invoice_by_id(invoice_id)
     if not inv:
         st.error("Invoice not found.")
@@ -884,6 +910,7 @@ def edit_invoice_dialog(invoice_id: int):
 
 @st.dialog("🚫 Void Invoice")
 def void_invoice_dialog(invoice_id: int):
+    _require_modify_permission()
     inv = get_invoice_by_id(invoice_id)
     inv_num = inv["invoice_number"] if inv else f"#{invoice_id}"
     st.warning(f"⚠️ Void **{inv_num}**? This cannot be undone.")
