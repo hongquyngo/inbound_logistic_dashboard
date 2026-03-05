@@ -264,7 +264,12 @@ def _list_fragment():
     # ── Action bar ────────────────────────────────────────────────────────────
     sel_rows = event.selection.rows
     if sel_rows:
-        idx     = sel_rows[0]
+        idx = sel_rows[0]
+        # Guard against stale selection when filters reduce the table size
+        if idx >= len(disp):
+            state._table_key += 1
+            st.rerun(scope="fragment")
+            return
         sel_id  = int(disp.iloc[idx]["cost_id"])
         sel_can = disp.iloc[idx].get("CAN #", "—")
 

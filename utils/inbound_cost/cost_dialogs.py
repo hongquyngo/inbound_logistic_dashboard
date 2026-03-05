@@ -36,6 +36,7 @@ from .cost_attachments import (
     summarize_files,
 )
 from .cost_service import CostService
+from .cost_calculator import recalculate_landed_cost
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,32 @@ def _invalidate_cache():
     _cached_cost_types.clear()
     _cached_arrivals.clear()
     _cached_vendors.clear()
+
+
+def _run_recalculate(arrival_id, context: str = "") -> None:
+    """
+    Call recalculate_landed_cost and surface result as a Streamlit notification.
+    Swallows exceptions so that UI flow is never blocked by recalculation errors.
+    """
+    if not arrival_id:
+        logger.warning(f"_run_recalculate: no arrival_id for context '{context}'")
+        return
+    try:
+        ok, msg, stats = recalculate_landed_cost(int(arrival_id))
+        if ok:
+            st.toast(
+                f"🔄 Landed cost recalculated — "
+                f"{stats['details_updated']} line(s) updated "
+                f"[{stats['allocation_method']}]",
+                icon="✅",
+            )
+            logger.info(f"[{context}] {msg}")
+        else:
+            st.warning(f"⚠️ Landed cost recalculation issue: {msg}")
+            logger.error(f"[{context}] {msg}")
+    except Exception as exc:
+        logger.error(f"[{context}] Unexpected recalculation error: {exc}")
+        st.warning("⚠️ Could not recalculate landed cost — please check logs.")
 
 
 def _fmt(amount, currency="") -> str:
@@ -417,6 +444,9 @@ def create_cost_dialog():
 
             st.success(f"✅ Cost entry #{new_id} created — {category} / {sel_type_name}")
             _invalidate_cache()
+
+            # ── Recalculate landed cost for this arrival ───────────────────
+            _run_recalculate(sel_arr_id, f"create #{new_id}")
             st.session_state["_last_created_cost"] = {
                 "id":       new_id,
                 "type":     sel_type_name,
@@ -545,6 +575,8 @@ def edit_cost_dialog(cost_id: int):
                 if ok:
                     st.success(f"✅ Cost entry #{cost_id} updated.")
                     _invalidate_cache()
+                    # ── Recalculate landed cost ──────────────────────────
+                    _run_recalculate(entry.get("arrival_id"), f"edit #{cost_id}")
                     st.rerun()
                 else:
                     st.error(f"❌ {db_err}")
@@ -701,6 +733,8 @@ def delete_cost_dialog(cost_id: int):
             if ok:
                 st.success(f"✅ {msg}")
                 _invalidate_cache()
+                # ── Recalculate landed cost ──────────────────────────────
+                _run_recalculate(entry.get("arrival_id"), f"delete #{cost_id}")
                 st.session_state["_last_deleted_cost"] = cost_id
                 st.rerun()
             else:

@@ -22,6 +22,7 @@ from .cost_data import (
 )
 from .cost_service import CostService
 from .cost_s3 import CostS3Manager
+from .cost_calculator import recalculate_landed_cost
 from .cost_attachments import (
     validate_uploaded_files,
     prepare_files_for_upload,
@@ -45,6 +46,8 @@ __all__ = [
     "CostService",
     # cost_s3
     "CostS3Manager",
+    # cost_calculator
+    "recalculate_landed_cost",
     # cost_attachments
     "validate_uploaded_files", "prepare_files_for_upload",
     "upload_files_to_s3", "cleanup_failed_uploads", "get_presigned_url",
