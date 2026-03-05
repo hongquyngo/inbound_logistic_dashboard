@@ -1,35 +1,59 @@
-# requirements.txt for Outbound Logistics App
-
-# Core dependencies
+# Core Framework
 streamlit
+streamlit-option-menu
+
+# Data Processing
 pandas
 numpy
+openpyxl
+xlsxwriter
+python-dateutil
 
 # Database
 sqlalchemy
 pymysql
+cryptography # Required for pymysql
 
-# Authentication
-python-dotenv
-
-# Data visualization
+# Visualization
+altair
 plotly
 matplotlib
 seaborn
 
-# Excel handling
-openpyxl
-xlsxwriter
+# Authentication & Security
+bcrypt
+python-jose[cryptography] # For JWT
+streamlit-authenticator # Optional, or build custom
 
-# Email
-email-validator
+# Caching & Performance
+cachetools
+streamlit-aggrid # Advanced tables
+redis==5.0.1  # Optional for external caching
 
-# Date handling
-python-dateutil
+# Export & Reporting
+reportlab # PDF generation
+python-pptx # PowerPoint
+Pillow # Image processing
+jinja2  # Template engine
 
-# Missing dependencies based on error
-reportlab # For PDF generation
-
-
-# Other utilities
+# Utilities
+python-dotenv
+pytz
 requests
+pyyaml
+
+# Development Tools (Optional)
+black  # Code formatting
+flake8  # Linting
+pytest  # Testing
+pytest-cov  # Test coverage
+
+# Monitoring & Logging (Optional)
+loguru  # Better logging
+sentry-sdk  # Error tracking
+
+
+
+# AWS S3 (if not already installed)
+boto3
+botocore
