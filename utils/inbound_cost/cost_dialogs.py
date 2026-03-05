@@ -18,12 +18,15 @@ from .cost_data import (
     get_cost_type_options,
     get_arrival_options,
     get_vendor_options,
+    get_currency_options,
     create_cost_entry,
     update_cost_entry,
     delete_cost_entry,
     get_cost_attachments,
     save_cost_media_records,
     delete_cost_attachment,
+    update_arrival_currency,
+    get_arrival_goods_value_usd,
 )
 from .cost_attachments import (
     validate_uploaded_files,
@@ -36,7 +39,6 @@ from .cost_attachments import (
     summarize_files,
 )
 from .cost_service import CostService
-from .cost_calculator import recalculate_landed_cost
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +89,7 @@ def _invalidate_cache():
     _cached_cost_types.clear()
     _cached_arrivals.clear()
     _cached_vendors.clear()
+    _cached_currencies.clear()
 
 
 def _run_recalculate(arrival_id, context: str = "") -> None:
@@ -98,6 +101,7 @@ def _run_recalculate(arrival_id, context: str = "") -> None:
         logger.warning(f"_run_recalculate: no arrival_id for context '{context}'")
         return
     try:
+        from .cost_calculator import recalculate_landed_cost
         ok, msg, stats = recalculate_landed_cost(int(arrival_id))
         if ok:
             st.toast(
@@ -138,6 +142,40 @@ def _cached_arrivals() -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_vendors() -> pd.DataFrame:
     return get_vendor_options()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_currencies() -> pd.DataFrame:
+    return get_currency_options()
+
+
+def _fetch_exchange_rate(currency_code: str) -> Optional[float]:
+    """
+    Fetch USD per 1 unit of currency_code via exchangerate-api.
+    Returns None on failure.
+    e.g. VND → 0.0000395  (1 VND = 0.0000395 USD)
+    """
+    if currency_code in ("USD", ""):
+        return 1.0
+    try:
+        from utils.config import config
+        api_key = config.get_api_key("exchange_rate")
+        if not api_key:
+            logger.warning("Exchange rate API key not configured.")
+            return None
+        import urllib.request, json
+        url = f"https://v6.exchangerate-api.com/v6/{api_key}/pair/USD/{currency_code}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data = json.loads(resp.read())
+        if data.get("result") == "success":
+            # API returns: 1 USD = X currency  →  we need 1 currency = Y USD
+            usd_per_currency = 1.0 / data["conversion_rate"]
+            return round(usd_per_currency, 10)
+        logger.warning(f"Exchange rate API error for {currency_code}: {data}")
+        return None
+    except Exception as e:
+        logger.error(f"_fetch_exchange_rate({currency_code}): {e}")
+        return None
 
 
 
@@ -347,18 +385,90 @@ def create_cost_dialog():
         axis=1,
     )
     can_map      = dict(zip(arrivals_df["label"], arrivals_df["id"]))
+    # Build currency lookup maps from arrivals data
+    intl_ccy_id_map   = dict(zip(arrivals_df["id"], arrivals_df.get("intl_currency_id",   pd.Series(dtype=object))))
+    intl_ccy_code_map = dict(zip(arrivals_df["id"], arrivals_df.get("intl_currency_code", pd.Series(dtype=str))))
+    local_ccy_id_map  = dict(zip(arrivals_df["id"], arrivals_df.get("local_currency_id",  pd.Series(dtype=object))))
+    local_ccy_code_map= dict(zip(arrivals_df["id"], arrivals_df.get("local_currency_code",pd.Series(dtype=str))))
+    intl_rate_map     = dict(zip(arrivals_df["id"], arrivals_df.get("usd_international_cost_currency_exchange_rate", pd.Series(dtype=float))))
+    local_rate_map    = dict(zip(arrivals_df["id"], arrivals_df.get("usd_local_cost_currency_exchange_rate",         pd.Series(dtype=float))))
+
     sel_can_lbl  = st.selectbox("Select CAN *", list(can_map.keys()), key="cc_can")
     sel_arr_id   = can_map[sel_can_lbl]
 
-    # ── Step 3: Amount + Vendor ───────────────────────────────────────────────
+    # Resolve existing currency on this arrival for selected category
+    if category == "INTERNATIONAL":
+        cur_ccy_id   = intl_ccy_id_map.get(sel_arr_id)
+        cur_ccy_code = intl_ccy_code_map.get(sel_arr_id) or ""
+        cur_usd_rate = float(intl_rate_map.get(sel_arr_id) or 0.0)
+    else:
+        cur_ccy_id   = local_ccy_id_map.get(sel_arr_id)
+        cur_ccy_code = local_ccy_code_map.get(sel_arr_id) or ""
+        cur_usd_rate = float(local_rate_map.get(sel_arr_id) or 0.0)
+
+    # ── Step 3: Currency + Exchange Rate ─────────────────────────────────────
+    st.markdown("---")
+    currencies_df = _cached_currencies()
+    ccy_map       = {f"{r['code']} — {r['name']}": (int(r["id"]), r["code"])
+                     for _, r in currencies_df.iterrows()}
+    ccy_labels    = list(ccy_map.keys())
+    cur_ccy_label = next((lbl for lbl, (cid, _) in ccy_map.items()
+                          if cid == cur_ccy_id), None)
+    default_ccy_idx = ccy_labels.index(cur_ccy_label) if cur_ccy_label in ccy_labels else 0
+
+    ccy_col, rate_col = st.columns(2)
+    with ccy_col:
+        label_hint = f"currently: **{cur_ccy_code}**" if cur_ccy_code else "⚠️ not set on CAN"
+        sel_ccy_label = st.selectbox(
+            f"Currency * ({label_hint})",
+            ccy_labels,
+            index=default_ccy_idx,
+            key="cc_currency",
+            help="Currency stored at CAN level — changing it affects ALL cost entries for this CAN.",
+        )
+        sel_ccy_id, sel_ccy_code = ccy_map[sel_ccy_label]
+        currency_changed = (sel_ccy_code != cur_ccy_code)
+
+    with rate_col:
+        # Auto-fetch if currency changed or rate not set yet
+        if currency_changed or cur_usd_rate == 0:
+            fetched_rate = _fetch_exchange_rate(sel_ccy_code)
+            initial_rate = fetched_rate if fetched_rate else cur_usd_rate
+        else:
+            fetched_rate = None
+            initial_rate = cur_usd_rate
+
+        usd_rate = st.number_input(
+            f"Rate: 1 {sel_ccy_code} = ? USD",
+            value=float(initial_rate) if initial_rate else 0.0,
+            min_value=0.0,
+            format="%.10f",
+            key="cc_usd_rate",
+            help="Auto-fetched from exchange rate API. You can adjust manually if needed.",
+        )
+        if fetched_rate:
+            st.caption(f"🔄 Auto-fetched: 1 {sel_ccy_code} = {fetched_rate:.8f} USD")
+        elif cur_usd_rate > 0:
+            st.caption(f"✅ Current CAN rate: 1 {sel_ccy_code} = {cur_usd_rate:.8f} USD")
+
+    if currency_changed and cur_ccy_code:
+        st.warning(
+            f"⚠️ **Currency change:** `{cur_ccy_code}` → `{sel_ccy_code}`  \n"
+            f"This updates the CAN-level currency and triggers **landed cost recalculation** for all lines."
+        )
+
+    # ── Step 4: Amount + Vendor ───────────────────────────────────────────────
     st.markdown("---")
     amt_col, vendor_col = st.columns(2)
     with amt_col:
         amount = st.number_input(
-            "Amount *",
+            f"Amount * ({sel_ccy_code})",
             min_value=0.01, step=0.01, format="%.2f", key="cc_amount",
-            help="Enter in the CAN's charge currency (set on the arrival record).",
+            help=f"Enter amount in **{sel_ccy_code}**.",
         )
+        # Show USD equivalent
+        if usd_rate > 0 and sel_ccy_code != "USD":
+            st.caption(f"≈ **USD {amount * usd_rate:,.2f}**")
     with vendor_col:
         vendors_df = _cached_vendors()
         vendor_map = {"— Not specified —": None}
@@ -372,7 +482,7 @@ def create_cost_dialog():
         )
         sel_vendor_id = vendor_map[sel_vendor_lbl]
 
-    # ── Step 4: Attachments (optional) ───────────────────────────────────────
+    # ── Step 4b: Attachments (optional) ──────────────────────────────────────
     st.markdown("---")
     with st.expander("📎 Attach Documents (optional)", expanded=False):
         uploaded = st.file_uploader(
@@ -393,6 +503,40 @@ def create_cost_dialog():
                     f"{summary['total_size_formatted']} — "
                     f"Types: {', '.join(summary['types'])}"
                 )
+    # keep uploaded in scope for save handler (declared above, may be None if expander not opened)
+    if "uploaded" not in dir():
+        uploaded = None
+
+    # ── Step 5: Anomaly check (preview before save) ───────────────────────────
+    if amount > 0.01 and usd_rate > 0:
+        amount_usd = amount * usd_rate
+        goods_value_usd = get_arrival_goods_value_usd(sel_arr_id)
+        if goods_value_usd > 0:
+            # Fetch existing logistic costs for this arrival
+            existing_intl_usd  = 0.0
+            existing_local_usd = 0.0
+            try:
+                from .cost_data import get_recent_costs
+                _tmp = get_recent_costs(limit=2000)
+                if not _tmp.empty:
+                    _arr = _tmp[_tmp["arrival_id"] == sel_arr_id]
+                    existing_intl_usd  = float(_arr[_arr["category"] == "INTERNATIONAL"]["amount_usd"].sum())
+                    existing_local_usd = float(_arr[_arr["category"] == "LOCAL"]["amount_usd"].sum())
+            except Exception:
+                pass
+
+            new_intl_usd  = existing_intl_usd  + amount_usd if category == "INTERNATIONAL" else existing_intl_usd
+            new_local_usd = existing_local_usd + amount_usd if category == "LOCAL"          else existing_local_usd
+            total_logistic_usd = new_intl_usd + new_local_usd
+            logistic_ratio     = total_logistic_usd / goods_value_usd * 100
+
+            if logistic_ratio > 30:
+                st.warning(
+                    f"⚠️ **Anomaly Warning** — After this entry, total logistic cost will be "
+                    f"**{logistic_ratio:.1f}%** of goods value "
+                    f"(Logistic: **${total_logistic_usd:,.2f}** / Goods: **${goods_value_usd:,.2f}** USD).  \n"
+                    f"{'🚨 This is unusually high — please verify.' if logistic_ratio > 50 else 'Please double-check the amount.'}"
+                )
 
     # ── Actions ───────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -406,10 +550,25 @@ def create_cost_dialog():
             if not valid:
                 st.error(err_msg)
                 return
+            if usd_rate <= 0:
+                st.error("❌ Exchange rate must be greater than 0.")
+                return
 
             uid = _keycloak_id(user)
 
-            # Upload files if any
+            # Step A: Update arrival currency if changed or not set
+            if currency_changed or cur_usd_rate == 0 or cur_ccy_id != sel_ccy_id:
+                ccy_ok, ccy_err = update_arrival_currency(
+                    arrival_id=sel_arr_id,
+                    category=category,
+                    currency_id=sel_ccy_id,
+                    exchange_rate=usd_rate,
+                )
+                if not ccy_ok:
+                    st.error(f"❌ Failed to update currency on arrival: {ccy_err}")
+                    return
+
+            # Step B: Upload files if any
             s3_keys = []
             if uploaded:
                 ok, errs, meta = validate_uploaded_files(uploaded)
@@ -422,7 +581,7 @@ def create_cost_dialog():
                 if failed:
                     st.warning(f"⚠️ {len(failed)} file(s) failed to upload: {', '.join(failed)}")
 
-            # Create cost entry
+            # Step C: Create cost entry
             ok, new_id, db_err = create_cost_entry(
                 cost_type_id=sel_type_id,
                 arrival_type=category,
@@ -436,7 +595,7 @@ def create_cost_dialog():
                 st.error(f"❌ {db_err}")
                 return
 
-            # Link attachments
+            # Step D: Link attachments
             if s3_keys:
                 att_ok, _, att_err = save_cost_media_records(new_id, s3_keys, uid)
                 if not att_ok:
@@ -445,8 +604,9 @@ def create_cost_dialog():
             st.success(f"✅ Cost entry #{new_id} created — {category} / {sel_type_name}")
             _invalidate_cache()
 
-            # ── Recalculate landed cost for this arrival ───────────────────
+            # Step E: Recalculate landed cost
             _run_recalculate(sel_arr_id, f"create #{new_id}")
+
             st.session_state["_last_created_cost"] = {
                 "id":       new_id,
                 "type":     sel_type_name,
@@ -575,7 +735,6 @@ def edit_cost_dialog(cost_id: int):
                 if ok:
                     st.success(f"✅ Cost entry #{cost_id} updated.")
                     _invalidate_cache()
-                    # ── Recalculate landed cost ──────────────────────────
                     _run_recalculate(entry.get("arrival_id"), f"edit #{cost_id}")
                     st.rerun()
                 else:
@@ -733,7 +892,6 @@ def delete_cost_dialog(cost_id: int):
             if ok:
                 st.success(f"✅ {msg}")
                 _invalidate_cache()
-                # ── Recalculate landed cost ──────────────────────────────
                 _run_recalculate(entry.get("arrival_id"), f"delete #{cost_id}")
                 st.session_state["_last_deleted_cost"] = cost_id
                 st.rerun()

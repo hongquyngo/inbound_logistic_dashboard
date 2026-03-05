@@ -181,14 +181,23 @@ def get_arrival_options(limit: int = 500) -> pd.DataFrame:
             a.arrival_note_number,
             DATE(COALESCE(a.adjust_arrival_date, a.arrival_date)) AS arrival_date,
             a.status,
-            s.english_name  AS sender,
-            r.english_name  AS receiver,
-            wh.name         AS warehouse_name
+            s.english_name          AS sender,
+            r.english_name          AS receiver,
+            wh.name                 AS warehouse_name,
+            ic.id                   AS intl_currency_id,
+            ic.code                 AS intl_currency_code,
+            lc.id                   AS local_currency_id,
+            lc.code                 AS local_currency_code,
+            a.usd_international_cost_currency_exchange_rate,
+            a.usd_local_cost_currency_exchange_rate
         FROM arrivals a
-        LEFT JOIN companies  s  ON a.sender_id    = s.id
-        LEFT JOIN companies  r  ON a.receiver_id  = r.id
-        LEFT JOIN warehouses wh ON a.warehouse_id = wh.id
+        LEFT JOIN companies  s  ON a.sender_id            = s.id
+        LEFT JOIN companies  r  ON a.receiver_id          = r.id
+        LEFT JOIN warehouses wh ON a.warehouse_id         = wh.id
+        LEFT JOIN currencies ic ON a.internal_currency_id = ic.id
+        LEFT JOIN currencies lc ON a.local_currency_id    = lc.id
         WHERE a.delete_flag = b'0'
+          AND a.status != 'REQUEST_STATUS'
         ORDER BY a.arrival_date DESC
         LIMIT :lim
         """)
@@ -197,6 +206,93 @@ def get_arrival_options(limit: int = 500) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading arrivals: {e}")
         return pd.DataFrame()
+
+
+# ============================================================================
+# READ — CURRENCY OPTIONS
+# ============================================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_currency_options() -> pd.DataFrame:
+    """Load all active currencies. Returns DataFrame: id, code, name."""
+    try:
+        engine = get_db_engine()
+        query = text("""
+        SELECT id, code, name
+        FROM currencies
+        WHERE delete_flag = 0 OR delete_flag IS NULL
+        ORDER BY code
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql(query, conn)
+    except Exception as e:
+        logger.error(f"Error loading currencies: {e}")
+        return pd.DataFrame(columns=["id", "code", "name"])
+
+
+# ============================================================================
+# WRITE — UPDATE ARRIVAL CURRENCY
+# ============================================================================
+
+def update_arrival_currency(
+    arrival_id:    int,
+    category:      str,    # 'INTERNATIONAL' | 'LOCAL'
+    currency_id:   int,
+    exchange_rate: float,  # 1 unit of currency = exchange_rate USD
+) -> Tuple[bool, str]:
+    """
+    Update currency + USD exchange rate on arrivals record.
+    INTERNATIONAL → internal_currency_id  + usd_international_cost_currency_exchange_rate
+    LOCAL         → local_currency_id     + usd_local_cost_currency_exchange_rate
+    WARNING: affects ALL cost entries for this arrival.
+    """
+    try:
+        engine = get_db_engine()
+        col_id   = "internal_currency_id"   if category == "INTERNATIONAL" else "local_currency_id"
+        col_rate = "usd_international_cost_currency_exchange_rate" if category == "INTERNATIONAL" \
+                   else "usd_local_cost_currency_exchange_rate"
+        with engine.begin() as conn:
+            conn.execute(text(f"""
+            UPDATE arrivals
+            SET    {col_id}   = :cid,
+                   {col_rate} = :rate,
+                   modified_date = NOW()
+            WHERE  id = :aid AND delete_flag = b'0'
+            """), {"cid": currency_id, "rate": exchange_rate, "aid": arrival_id})
+        logger.info(f"Updated arrival #{arrival_id} {category} currency → id={currency_id}, rate={exchange_rate:.8f}")
+        return True, ""
+    except Exception as e:
+        err = f"Failed to update arrival currency: {e}"
+        logger.error(err)
+        return False, err
+
+
+# ============================================================================
+# READ — GOODS VALUE FOR ANOMALY DETECTION
+# ============================================================================
+
+def get_arrival_goods_value_usd(arrival_id: int) -> float:
+    """Total goods value in USD: SUM(unit_cost × qty × exchange_rate) / usd_landed_rate."""
+    try:
+        engine = get_db_engine()
+        query = text("""
+        SELECT COALESCE(
+            SUM(COALESCE(ppo.unit_cost, 0) * ad.arrival_quantity * ad.exchange_rate)
+            / NULLIF(a.usd_landed_cost_currency_exchange_rate, 0),
+            0
+        ) AS goods_value_usd
+        FROM arrival_details ad
+        JOIN arrivals a ON ad.arrival_id = a.id AND a.delete_flag = b'0'
+        LEFT JOIN product_purchase_orders ppo
+               ON ad.product_purchase_order_id = ppo.id AND ppo.delete_flag = 0
+        WHERE ad.arrival_id = :aid AND ad.delete_flag = b'0'
+        """)
+        with engine.connect() as conn:
+            row = conn.execute(query, {"aid": arrival_id}).fetchone()
+        return float(row[0]) if row and row[0] else 0.0
+    except Exception as e:
+        logger.error(f"Error getting goods value for arrival #{arrival_id}: {e}")
+        return 0.0
 
 
 @st.cache_data(ttl=300, show_spinner=False)
