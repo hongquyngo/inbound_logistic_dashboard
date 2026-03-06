@@ -495,7 +495,9 @@ class GAPDataLoader:
         brands: Optional[Tuple[str, ...]] = None,
         exclude_products: bool = False,
         exclude_brands: bool = False,
-        exclude_expired: bool = True
+        exclude_expired: bool = True,
+        po_approval_statuses: Optional[Tuple[str, ...]] = ('APPROVED',),
+        po_order_types: Optional[Tuple[str, ...]] = ('REGULAR_ORDER', 'SAMPLE_ORDER', 'MIXED_ORDER'),
     ) -> pd.DataFrame:
         """Load supply data from unified_supply_view"""
         try:
@@ -505,7 +507,8 @@ class GAPDataLoader:
             
             query, params = _self._build_supply_query(
                 entity_name, exclude_entity, product_ids, brands,
-                exclude_products, exclude_brands, exclude_expired
+                exclude_products, exclude_brands, exclude_expired,
+                po_approval_statuses, po_order_types
             )
             
             with _self.get_connection() as conn:
@@ -778,7 +781,9 @@ class GAPDataLoader:
         brands: Optional[Tuple[str, ...]],
         exclude_products: bool,
         exclude_brands: bool,
-        exclude_expired: bool
+        exclude_expired: bool,
+        po_approval_statuses: Optional[Tuple[str, ...]] = ('APPROVED',),
+        po_order_types: Optional[Tuple[str, ...]] = ('REGULAR_ORDER', 'SAMPLE_ORDER', 'MIXED_ORDER'),
     ) -> Tuple[str, Dict[str, Any]]:
         """Build supply query"""
         
@@ -846,6 +851,26 @@ class GAPDataLoader:
         
         if exclude_expired:
             query_parts.append("AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE())")
+        
+        # PO-specific filters: only apply to PURCHASE_ORDER rows (NULL = non-PO rows, always pass)
+        if po_approval_statuses:
+            placeholders = [f":po_appr_{i}" for i in range(len(po_approval_statuses))]
+            query_parts.append(
+                f"AND (supply_source != 'PURCHASE_ORDER' "
+                f"OR approval_status IN ({','.join(placeholders)}))"
+            )
+            for i, status in enumerate(po_approval_statuses):
+                params[f'po_appr_{i}'] = status
+        
+        if po_order_types:
+            placeholders = [f":po_type_{i}" for i in range(len(po_order_types))]
+            query_parts.append(
+                f"AND (supply_source != 'PURCHASE_ORDER' "
+                f"OR purchase_order_type IN ({','.join(placeholders)}) "
+                f"OR purchase_order_type IS NULL)"
+            )
+            for i, otype in enumerate(po_order_types):
+                params[f'po_type_{i}'] = otype
         
         query_parts.append("ORDER BY product_id, supply_priority, days_to_available")
         
@@ -938,7 +963,8 @@ class GAPDataLoader:
             'days_to_expiry', 'available_quantity', 'availability_date',
             'days_to_available', 'availability_status', 'warehouse_name',
             'to_location', 'entity_name', 'unit_cost_usd', 'total_value_usd',
-            'supply_reference_id', 'supplier_name', 'completion_percentage'
+            'supply_reference_id', 'supplier_name', 'completion_percentage',
+            'purchase_order_type', 'approval_status',
         ])
     
     def _get_empty_demand_dataframe(self) -> pd.DataFrame:

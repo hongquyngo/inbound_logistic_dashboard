@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timedelta
 import logging
 
-from .constants import SUPPLY_SOURCES, DEMAND_SOURCES
+from .constants import SUPPLY_SOURCES, DEMAND_SOURCES, PO_APPROVAL_STATUSES, PO_ORDER_TYPES
 from .state import get_state
 
 logger = logging.getLogger(__name__)
@@ -335,6 +335,17 @@ class GAPFilters:
                     if active_filters > 0:
                         st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
                         st.info(f"✔ {active_filters} filters active")
+                
+                # PO-specific filters (only shown when PURCHASE_ORDER is selected)
+                if 'PURCHASE_ORDER' in filters.get('supply_sources', []):
+                    with st.container():
+                        po_statuses, po_types = self._render_po_filters(current)
+                        filters['po_approval_statuses'] = po_statuses
+                        filters['po_order_types'] = po_types
+                else:
+                    # Giữ defaults khi PO source không được chọn
+                    filters['po_approval_statuses'] = ['APPROVED']
+                    filters['po_order_types'] = list(PO_ORDER_TYPES.keys())
                 
                 # 5. TÙY CHỌN PHÂN TÍCH (ANALYSIS OPTIONS)
                 st.divider()
@@ -679,6 +690,48 @@ class GAPFilters:
             st.caption("⚠️ Not configured")
             return False
     
+    def _render_po_filters(self, current: Dict) -> tuple:
+        """
+        Render PO-specific filters: approval_status and order_type.
+        Only shown when PURCHASE_ORDER supply source is selected.
+        Default: only APPROVED status, all order types.
+        """
+        st.markdown("**🔒 PO Filters**")
+        
+        col_appr, col_type = st.columns([1, 1])
+        
+        with col_appr:
+            st.caption("Approval Status")
+            selected_statuses = []
+            default_statuses = current.get('po_approval_statuses', ['APPROVED'])
+            for key, cfg in PO_APPROVAL_STATUSES.items():
+                if st.checkbox(
+                    f"{cfg['icon']} {cfg['label']}",
+                    value=key in default_statuses,
+                    key=f"po_appr_{key}",
+                ):
+                    selected_statuses.append(key)
+            # Fallback: nếu bỏ chọn hết thì giữ APPROVED
+            if not selected_statuses:
+                selected_statuses = ['APPROVED']
+        
+        with col_type:
+            st.caption("Order Type")
+            selected_types = []
+            default_types = current.get('po_order_types', list(PO_ORDER_TYPES.keys()))
+            for key, cfg in PO_ORDER_TYPES.items():
+                if st.checkbox(
+                    f"{cfg['icon']} {cfg['label']}",
+                    value=key in default_types,
+                    key=f"po_type_{key}",
+                ):
+                    selected_types.append(key)
+            # Fallback: nếu bỏ chọn hết thì lấy tất cả
+            if not selected_types:
+                selected_types = list(PO_ORDER_TYPES.keys())
+        
+        return selected_statuses, selected_types
+
     def _count_active_filters(self, filters: Dict) -> int:
         """Count non-default filters"""
         count = 0
@@ -695,6 +748,10 @@ class GAPFilters:
         if set(filters.get('supply_sources', [])) != set(defaults['supply_sources']):
             count += 1
         if set(filters.get('demand_sources', [])) != set(defaults['demand_sources']):
+            count += 1
+        if set(filters.get('po_approval_statuses', [])) != set(defaults['po_approval_statuses']):
+            count += 1
+        if set(filters.get('po_order_types', [])) != set(defaults['po_order_types']):
             count += 1
         
         return count

@@ -81,7 +81,9 @@ def calculate_gap(
             brands=filter_values.get('brands_tuple'),
             exclude_products=filter_values.get('exclude_products', False),
             exclude_brands=filter_values.get('exclude_brands', False),
-            exclude_expired=filter_values.get('exclude_expired', True)
+            exclude_expired=filter_values.get('exclude_expired', True),
+            po_approval_statuses=tuple(filter_values.get('po_approval_statuses', ['APPROVED'])),
+            po_order_types=tuple(filter_values.get('po_order_types', ['REGULAR_ORDER', 'SAMPLE_ORDER', 'MIXED_ORDER'])),
         )
         
         # Load expired inventory details if including expired
