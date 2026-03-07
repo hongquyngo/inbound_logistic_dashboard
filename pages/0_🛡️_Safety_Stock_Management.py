@@ -407,7 +407,7 @@ def demand_fetch_fragment():
         )
     with col3:
         st.write("")  # vertical alignment
-        if st.button("Fetch Data", type="primary", use_container_width=True, key="frag_fetch_btn"):
+        if st.button("Fetch Data", type="primary", width="stretch", key="frag_fetch_btn"):
             with st.spinner("Fetching from delivery_full_view..."):
                 fetch_and_store_demand_data(
                     product_id, entity_id, customer_id,
@@ -546,7 +546,7 @@ def render_data_section():
 
     with col1:
         if st.button(
-            "➕ Add Safety Stock", type="primary", use_container_width=True,
+            "➕ Add Safety Stock", type="primary", width="stretch",
             disabled=not has_permission('create')
         ):
             st.session_state.dialog_data = {}
@@ -554,7 +554,7 @@ def render_data_section():
 
     with col2:
         if st.button(
-            "📤 Bulk Upload", use_container_width=True,
+            "📤 Bulk Upload", width="stretch",
             disabled=not has_permission('bulk_upload')
         ):
             bulk_upload_dialog()
@@ -575,12 +575,12 @@ def render_data_section():
                 excel_bytes,
                 f"safety_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                width="stretch"
             )
             if was_limited:
                 st.caption(f"Limited to {len(export_df)} rows")
         else:
-            st.button("📥 Export Excel", use_container_width=True, disabled=True)
+            st.button("📥 Export Excel", width="stretch", disabled=True)
 
     with col4:
         report_bytes = generate_review_report()
@@ -589,11 +589,11 @@ def render_data_section():
             report_bytes,
             f"review_{datetime.now().strftime('%Y%m%d')}.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+            width="stretch"
         )
 
     with col5:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", width="stretch"):
             st.cache_data.clear()
             st.rerun(scope="fragment")
 
@@ -681,7 +681,7 @@ def render_data_section():
 
     selected = st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         selection_mode="single-row",
         on_select="rerun"
@@ -708,20 +708,20 @@ def render_data_section():
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        if st.button("✏️ Edit", use_container_width=True, disabled=not has_permission('edit')):
+        if st.button("✏️ Edit", width="stretch", disabled=not has_permission('edit')):
             st.session_state.dialog_data = {}
             safety_stock_form('edit', record['id'])
 
     with col2:
-        if st.button("📋 Review", use_container_width=True, disabled=not has_permission('review')):
+        if st.button("📋 Review", width="stretch", disabled=not has_permission('review')):
             review_dialog(record['id'])
 
     with col3:
-        if st.button("📊 Compare vs Inventory", use_container_width=True):
+        if st.button("📊 Compare vs Inventory", width="stretch"):
             st.session_state['compare_record_id'] = int(record['id'])
 
     with col4:
-        if st.button("🗑️ Delete", use_container_width=True,
+        if st.button("🗑️ Delete", width="stretch",
                      disabled=not has_permission('delete'),
                      type="secondary"):
             st.session_state['pending_delete_id'] = int(record['id'])
@@ -734,7 +734,7 @@ def render_data_section():
         )
         yes_col, no_col, _ = st.columns([1, 1, 4])
         with yes_col:
-            if st.button("✅ Yes, Delete", type="primary", use_container_width=True, key="del_yes"):
+            if st.button("✅ Yes, Delete", type="primary", width="stretch", key="del_yes"):
                 success, msg = delete_safety_stock(int(record['id']), st.session_state.username)
                 if success:
                     log_action('DELETE', f"Deleted safety stock ID {record['id']}")
@@ -744,7 +744,7 @@ def render_data_section():
                 else:
                     st.error(msg)
         with no_col:
-            if st.button("❌ Cancel", use_container_width=True, key="del_no"):
+            if st.button("❌ Cancel", width="stretch", key="del_no"):
                 st.session_state.pop('pending_delete_id', None)
                 st.rerun(scope="fragment")
 
@@ -752,7 +752,7 @@ def render_data_section():
     with st.expander("📜 Review History", expanded=False):
         history = get_review_history(int(record['id']))
         if not history.empty:
-            st.dataframe(history, use_container_width=True, hide_index=True)
+            st.dataframe(history, width="stretch", hide_index=True)
         else:
             st.info("No review history found for this rule.")
 
@@ -802,7 +802,7 @@ def _render_compare_panel(record):
             m4.metric("ROP Status", "—")
 
         if not inv_df.empty:
-            st.dataframe(inv_df, use_container_width=True, hide_index=True)
+            st.dataframe(inv_df, width="stretch", hide_index=True)
         else:
             st.info("No inventory found for this product across all warehouses.")
 
@@ -1191,7 +1191,7 @@ def safety_stock_form(mode: str = 'add', record_id=None):
     col1, col2, col3 = st.columns([1, 1, 2])
 
     with col1:
-        if st.button("💾 Save", type="primary", use_container_width=True, key="dlg_save"):
+        if st.button("💾 Save", type="primary", width="stretch", key="dlg_save"):
             _save_safety_stock(
                 mode=mode,
                 record_id=record_id,
@@ -1206,13 +1206,13 @@ def safety_stock_form(mode: str = 'add', record_id=None):
             )
 
     with col2:
-        if st.button("✖ Cancel", use_container_width=True, key="dlg_cancel"):
+        if st.button("✖ Cancel", width="stretch", key="dlg_cancel"):
             st.session_state.dialog_data = {}
             st.rerun()
 
     with col3:
         if mode == 'edit' and has_permission('review'):
-            if st.button("📋 Create Review", use_container_width=True, key="dlg_review"):
+            if st.button("📋 Create Review", width="stretch", key="dlg_review"):
                 review_dialog(record_id)
 
 
@@ -1428,10 +1428,10 @@ def review_dialog(safety_stock_id):
         sub_col1, sub_col2 = st.columns([3, 1])
         with sub_col1:
             submitted = st.form_submit_button(
-                "✅ Submit Review", type="primary", use_container_width=True
+                "✅ Submit Review", type="primary", width="stretch"
             )
         with sub_col2:
-            cancelled = st.form_submit_button("✖ Cancel", use_container_width=True)
+            cancelled = st.form_submit_button("✖ Cancel", width="stretch")
 
     if cancelled:
         st.rerun()
@@ -1493,14 +1493,14 @@ def bulk_upload_dialog():
 
     col1, col2 = st.columns([1, 3])
     with col1:
-        if st.button("Download Template", use_container_width=True):
+        if st.button("Download Template", width="stretch"):
             template = create_upload_template(include_sample_data=True)
             st.download_button(
                 label="Save Template",
                 data=template,
                 file_name=f"safety_stock_template_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                width="stretch"
             )
 
     st.divider()
@@ -1519,7 +1519,7 @@ def bulk_upload_dialog():
             df = df.iloc[1:].reset_index(drop=True)
 
         st.info(f"Found {len(df)} rows")
-        st.dataframe(df.head(10), use_container_width=True)
+        st.dataframe(df.head(10), width="stretch")
 
         with st.spinner("Validating..."):
             is_valid, validated_df, errors = validate_bulk_data(df)
@@ -1534,7 +1534,7 @@ def bulk_upload_dialog():
 
         with st.form("bulk_import_form", border=False):
             st.write("Review the data above, then confirm import:")
-            if st.form_submit_button("Import Data", type="primary", use_container_width=True):
+            if st.form_submit_button("Import Data", type="primary", width="stretch"):
                 with st.spinner("Importing..."):
                     data_list = validated_df.to_dict('records')
                     success, message, results = bulk_create_safety_stock(
