@@ -10,92 +10,72 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Define role permissions matrix (theo bảng screenshot)
-ROLE_PERMISSIONS = {
-    'admin': {
-        'view': True,
-        'create': True,
-        'edit': True,
-        'delete': True,
-        'review': True,
-        'bulk_upload': True,
-        'approve': True
-    },
-    'MD': {  # Managing Director
-        'view': True,
-        'create': True,
-        'edit': True,
-        'delete': True,
-        'review': True,
-        'bulk_upload': True,
-        'approve': True
-    },
-    'GM': {  # General Manager
-        'view': True,
-        'create': True,
-        'edit': True,
-        'delete': True,
-        'review': True,
-        'bulk_upload': True,
-        'approve': True
-    },
-    'supply_chain': {
-        'view': True,
-        'create': True,
-        'edit': True,
-        'delete': False,
-        'review': True,
-        'bulk_upload': True,
-        'approve': False
-    },
-    'sales_manager': {
-        'view': True,
-        'create': True,
-        'edit': True,
-        'delete': False,
-        'review': True,
-        'bulk_upload': False,
-        'approve': False
-    },
-    'sales': {
-        'view': True,
-        'create': False,
-        'edit': False,
-        'delete': False,
-        'review': True,
-        'bulk_upload': False,
-        'approve': False
-    },
-    'viewer': {
-        'view': True,
-        'create': False,
-        'edit': False,
-        'delete': False,
-        'review': False,
-        'bulk_upload': False,
-        'approve': False
-    },
-    'customer': {
-        'view': True,  # Limited to their own data
-        'create': False,
-        'edit': False,
-        'delete': False,
-        'review': False,
-        'bulk_upload': False,
-        'approve': False
-    }
+# ── Permission matrix ─────────────────────────────────────────────────────────
+# Columns: view | create | edit | delete | review | bulk_upload | approve
+#
+# create / edit : admin, supply_chain_manager, inbound_manager only
+# delete        : admin, supply_chain_manager only
+# approve       : admin, supply_chain_manager only
+# review        : all operational roles (not sales, fa, accountant, viewer, customer, vendor)
+# MD / GM       : strategic oversight — view + review + bulk_upload, NO create/edit/delete/approve
+
+_P = lambda v, c, e, d, r, b, a: {
+    'view': v, 'create': c, 'edit': e, 'delete': d,
+    'review': r, 'bulk_upload': b, 'approve': a
 }
 
-# Export row limits by role
+ROLE_PERMISSIONS = {
+    # ── Full control ──────────────────────────────────────────────────────────
+    'admin':                   _P(True,  True,  True,  True,  True,  True,  True),
+    'supply_chain_manager':    _P(True,  True,  True,  True,  True,  True,  True),
+
+    # ── Executive — view / review / bulk only (no create/edit/delete/approve) ─
+    'MD':                      _P(True,  False, False, False, True,  True,  False),
+    'GM':                      _P(True,  False, False, False, True,  True,  False),
+
+    # ── Operational — create + edit (no delete/approve) ──────────────────────
+    'inbound_manager':         _P(True,  True,  True,  False, True,  False, False),
+
+    # ── Operational — view + review only ─────────────────────────────────────
+    'supply_chain':            _P(True,  False, False, False, True,  False, False),
+    'buyer':                   _P(True,  False, False, False, True,  False, False),
+    'allocator':               _P(True,  False, False, False, True,  False, False),
+    'outbound_manager':        _P(True,  False, False, False, True,  False, False),
+    'warehouse_manager':       _P(True,  False, False, False, True,  False, False),
+    'sales_manager':           _P(True,  False, False, False, True,  False, False),
+
+    # ── View only ─────────────────────────────────────────────────────────────
+    'sales':                   _P(True,  False, False, False, False, False, False),
+    'fa_manager':              _P(True,  False, False, False, False, False, False),
+    'accountant':              _P(True,  False, False, False, False, False, False),
+    'viewer':                  _P(True,  False, False, False, False, False, False),
+
+    # ── Customer — limited to own data ────────────────────────────────────────
+    'customer':                _P(True,  False, False, False, False, False, False),
+
+    # ── No access ─────────────────────────────────────────────────────────────
+    'vendor':                  _P(False, False, False, False, False, False, False),
+}
+
+# Export row limits by role (None = unlimited)
 EXPORT_ROW_LIMITS = {
-    'customer': 1000,
-    'sales': 5000,
-    'sales_manager': 10000,
-    'viewer': 5000,
-    'supply_chain': None,  # No limit
-    'admin': None,
-    'MD': None,
-    'GM': None
+    'customer':             1_000,
+    'sales':                5_000,
+    'viewer':               5_000,
+    'fa_manager':           5_000,
+    'accountant':           5_000,
+    'sales_manager':        10_000,
+    'outbound_manager':     10_000,
+    'warehouse_manager':    10_000,
+    'allocator':            10_000,
+    'buyer':                10_000,
+    # Unlimited
+    'supply_chain':         None,
+    'supply_chain_manager': None,
+    'inbound_manager':      None,
+    'MD':                   None,
+    'GM':                   None,
+    'admin':                None,
 }
 
 
@@ -198,15 +178,23 @@ def get_user_info_display() -> str:
     
     # Map role to Vietnamese if needed
     role_display = {
-        'admin': 'Quản trị',
-        'MD': 'Tổng giám đốc',
-        'GM': 'Giám đốc',
-        'supply_chain': 'Chuỗi cung ứng',
-        'sales_manager': 'Quản lý bán hàng',
-        'sales': 'Bán hàng',
-        'viewer': 'Xem',
-        'customer': 'Khách hàng',
-        'vendor': 'Nhà cung cấp'
+        'admin':                'Quản trị',
+        'MD':                   'Tổng giám đốc',
+        'GM':                   'Giám đốc',
+        'supply_chain_manager': 'Quản lý chuỗi cung ứng',
+        'supply_chain':         'Chuỗi cung ứng',
+        'inbound_manager':      'Quản lý nhập kho',
+        'outbound_manager':     'Quản lý xuất kho',
+        'warehouse_manager':    'Quản lý kho',
+        'buyer':                'Mua hàng',
+        'allocator':            'Phân bổ',
+        'sales_manager':        'Quản lý bán hàng',
+        'sales':                'Bán hàng',
+        'fa_manager':           'Quản lý tài chính',
+        'accountant':           'Kế toán',
+        'viewer':               'Xem',
+        'customer':             'Khách hàng',
+        'vendor':               'Nhà cung cấp',
     }.get(role, role)
     
     return f"👤 {username} ({role_display})"
