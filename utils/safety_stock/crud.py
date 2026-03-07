@@ -683,7 +683,7 @@ def get_review_history_analytics(entity_id: int = None, days: int = 90) -> pd.Da
     """
     try:
         engine = get_db_engine()
-        conditions = ["ssr.delete_flag = 0", "DATE(ssr.review_date) >= DATE_SUB(CURDATE(), INTERVAL :days DAY)"]
+        conditions = ["DATE(ssr.review_date) >= DATE_SUB(CURDATE(), INTERVAL :days DAY)"]
         params: dict = {'days': days}
         if entity_id:
             conditions.append("ss_lvl.entity_id = :entity_id")

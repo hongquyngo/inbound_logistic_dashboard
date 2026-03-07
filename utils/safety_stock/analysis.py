@@ -25,11 +25,17 @@ def _load_entity_options() -> tuple[list, list]:
         df = get_safety_stock_levels(status='all')
         if df.empty or 'entity_code' not in df.columns:
             return [], []
-        pairs = (df[['entity_id', 'entity_code']]
-                 .dropna()
-                 .drop_duplicates()
+        pairs = (df[['entity_id', 'entity_code', 'entity_name']]
+                 .dropna(subset=['entity_id', 'entity_code'])
+                 .drop_duplicates(subset=['entity_id'])
                  .sort_values('entity_code'))
-        return pairs['entity_code'].tolist(), pairs['entity_id'].tolist()
+        labels = pairs.apply(
+            lambda r: f"{r['entity_code']} | {r['entity_name']}"
+                      if pd.notna(r.get('entity_name')) and r['entity_name']
+                      else str(r['entity_code']),
+            axis=1
+        ).tolist()
+        return labels, pairs['entity_id'].tolist()
     except Exception:
         return [], []
 
@@ -80,7 +86,7 @@ def _render_review_history(entity_id, days: int):
                 tooltip=['date:T', 'action_taken:N', 'count:Q']
             )
             .properties(height=220, title="Review Events by Day"))
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
 
     # Detail table
     table_cols = ['review_date', 'pt_code', 'product_name', 'brand_name',
@@ -145,7 +151,7 @@ def _render_ss_trend(entity_id, days: int):
                      'new_safety_stock_qty:Q', 'change_percentage:Q', 'action_taken:N']
         )
         .properties(height=280, title=f"SS Qty Timeline — {sel_pt}"))
-    st.altair_chart(line, use_container_width=True)
+    st.altair_chart(line, width="stretch")
 
     detail_cols = ['review_date', 'old_safety_stock_qty', 'new_safety_stock_qty',
                    'change_percentage', 'action_taken', 'review_type', 'action_reason']
@@ -210,7 +216,7 @@ Coverage % = On Hand ÷ SS Target × 100. Below 100% means stock is under the sa
                     .mark_rule(color='red', strokeDash=[4, 4])
                     .encode(x='x:Q'))
 
-        st.altair_chart(bar + rule_100, use_container_width=True)
+        st.altair_chart(bar + rule_100, width="stretch")
         st.caption("Dashed red line = 100% coverage threshold (on-hand = SS target)")
 
     tbl_cols = ['pt_code', 'product_name', 'brand_name', 'customer_code',
