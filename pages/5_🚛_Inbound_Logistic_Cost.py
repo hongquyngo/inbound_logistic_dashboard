@@ -16,6 +16,7 @@ from utils.inbound_cost import (
     get_filter_options,
     CostService,
 )
+from utils.inbound_cost.help import render_help_popover
 from utils.inbound_cost.cost_dialogs import (
     create_cost_dialog,
     view_cost_dialog,
@@ -100,12 +101,16 @@ def _header_fragment():
         )
     with btn_col:
         st.markdown("<br>", unsafe_allow_html=True)
-        if _can_write():
-            if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
-                create_cost_dialog()
-        else:
-            st.button("➕ Add Cost Entry", type="primary", width="stretch", disabled=True,
-                      help="🔒 Requires admin, inbound_manager, or supply_chain role.")
+        add_col, help_col = st.columns([3, 1])
+        with add_col:
+            if _can_write():
+                if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
+                    create_cost_dialog()
+            else:
+                st.button("➕ Add Cost Entry", type="primary", width="stretch", disabled=True,
+                          help="🔒 Requires admin, inbound_manager, or supply_chain role.")
+        with help_col:
+            render_help_popover()
 
     if state.last_created_cost:
         c = state.last_created_cost
