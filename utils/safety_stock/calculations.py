@@ -346,22 +346,24 @@ def get_historical_demand(
     try:
         engine = get_db_engine()
         
-        # Query historical demand from stock_out tables (existing logic)
+        # Query historical demand — group by ETD date (consistent with fetch_demand_stats)
+        # Previously used created_date which reflects order creation, not expected delivery
         query = text("""
         SELECT 
-            DATE(sod.created_date) as date,
+            DATE(COALESCE(sod.adjust_etd_date, sod.etd_date)) as date,
             SUM(sodrd.stock_out_request_quantity) as daily_demand
         FROM stock_out_delivery_request_details sodrd
         JOIN stock_out_delivery sod ON sodrd.delivery_id = sod.id
         WHERE sodrd.product_id = :product_id
         AND sod.seller_company_id = :entity_id
-        AND sod.created_date >= DATE_SUB(CURRENT_DATE(), INTERVAL :days_back DAY)
+        AND COALESCE(sod.adjust_etd_date, sod.etd_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL :days_back DAY)
+        AND COALESCE(sod.adjust_etd_date, sod.etd_date) IS NOT NULL
         AND sodrd.delete_flag = 0
         AND sod.delete_flag = 0
         """ + ("""
         AND sod.buyer_company_id = :customer_id
         """ if customer_id else "") + """
-        GROUP BY DATE(sod.created_date)
+        GROUP BY DATE(COALESCE(sod.adjust_etd_date, sod.etd_date))
         ORDER BY date
         """)
         
@@ -426,5 +428,3 @@ def get_historical_demand(
     except Exception as e:
         logger.error(f"Error analyzing historical demand: {e}")
         return default_stats
-
-    

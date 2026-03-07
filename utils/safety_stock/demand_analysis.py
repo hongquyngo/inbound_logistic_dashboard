@@ -24,12 +24,14 @@ def fetch_demand_stats(
     exclude_pending: bool = True
 ) -> Dict:
     """
-    Fetch demand statistics from delivery_full_view
+    Fetch demand statistics from underlying delivery tables directly.
+    Queries stock_out_delivery + stock_out_delivery_request_details via IDs
+    to avoid company_code subquery issues (company_code is not UNIQUE constrained).
     
     Args:
         product_id: Product ID
-        entity_id: Legal entity ID  
-        customer_id: Optional customer ID (None = all customers)
+        entity_id: Legal entity ID (seller_company_id)
+        customer_id: Optional customer ID (buyer_company_id) — None = all customers
         days_back: Number of days to analyze
         exclude_pending: Exclude deliveries with PENDING status
         
@@ -39,56 +41,56 @@ def fetch_demand_stats(
     try:
         engine = get_db_engine()
         
-        # Build query conditions
+        # Build WHERE conditions using IDs directly — no company_code subquery
         conditions = [
-            "product_id = :product_id",
-            "legal_entity_code = (SELECT company_code FROM companies WHERE id = :entity_id)"
+            "sodrd.product_id = :product_id",
+            "sod.seller_company_id = :entity_id",
+            "sodrd.delete_flag = 0",
+            "sod.delete_flag = 0",
+            "COALESCE(sod.adjust_etd_date, sod.etd_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL :days_back DAY)",
+            "COALESCE(sod.adjust_etd_date, sod.etd_date) IS NOT NULL",
+            "sodrd.stock_out_request_quantity > 0"
         ]
         
         if customer_id:
-            conditions.append("customer_code = (SELECT company_code FROM companies WHERE id = :customer_id)")
+            conditions.append("sod.buyer_company_id = :customer_id")
         
         if exclude_pending:
-            conditions.append("shipment_status != 'PENDING'")
-        
-        # Date range condition
-        conditions.append("sto_etd_date >= DATE_SUB(CURRENT_DATE(), INTERVAL :days_back DAY)")
-        conditions.append("sto_etd_date IS NOT NULL")
+            conditions.append("sod.shipment_status != 'PENDING'")
         
         where_clause = " AND ".join(conditions)
         
-        # Query for daily demand aggregation
+        # Query underlying tables directly — avoids view + company_code subquery
         query = text(f"""
         WITH daily_demand AS (
             SELECT 
-                DATE(sto_etd_date) as demand_date,
-                SUM(stock_out_request_quantity) as daily_quantity
-            FROM delivery_full_view
+                DATE(COALESCE(sod.adjust_etd_date, sod.etd_date)) AS demand_date,
+                SUM(sodrd.stock_out_request_quantity) AS daily_quantity
+            FROM stock_out_delivery_request_details sodrd
+            JOIN stock_out_delivery sod ON sodrd.delivery_id = sod.id
             WHERE {where_clause}
-                AND stock_out_request_quantity > 0
-            GROUP BY DATE(sto_etd_date)
+            GROUP BY DATE(COALESCE(sod.adjust_etd_date, sod.etd_date))
         ),
         demand_stats AS (
             SELECT 
-                AVG(daily_quantity) as avg_daily_demand,
-                STDDEV(daily_quantity) as demand_std_dev,
-                MAX(daily_quantity) as max_daily_demand,
-                MIN(daily_quantity) as min_daily_demand,
-                COUNT(*) as data_points
+                AVG(daily_quantity)    AS avg_daily_demand,
+                STDDEV(daily_quantity) AS demand_std_dev,
+                MAX(daily_quantity)    AS max_daily_demand,
+                MIN(daily_quantity)    AS min_daily_demand,
+                COUNT(*)               AS data_points
             FROM daily_demand
         )
         SELECT 
-            COALESCE(avg_daily_demand, 0) as avg_daily_demand,
-            COALESCE(demand_std_dev, 0) as demand_std_dev,
-            COALESCE(max_daily_demand, 0) as max_daily_demand,
-            COALESCE(min_daily_demand, 0) as min_daily_demand,
-            COALESCE(data_points, 0) as data_points,
-            -- Calculate coefficient of variation
+            COALESCE(avg_daily_demand, 0)    AS avg_daily_demand,
+            COALESCE(demand_std_dev, 0)      AS demand_std_dev,
+            COALESCE(max_daily_demand, 0)    AS max_daily_demand,
+            COALESCE(min_daily_demand, 0)    AS min_daily_demand,
+            COALESCE(data_points, 0)         AS data_points,
             CASE 
                 WHEN avg_daily_demand > 0 
                 THEN (demand_std_dev / avg_daily_demand * 100)
                 ELSE 0
-            END as cv_percent
+            END AS cv_percent
         FROM demand_stats
         """)
         
@@ -179,14 +181,15 @@ def get_lead_time_estimate(
     customer_id: Optional[int] = None
 ) -> Dict:
     """
-    Estimate lead time from historical delivery data
-    Calculates from OC date to delivered date
-    (Placeholder for future costbook integration)
+    Estimate lead time from historical delivery data.
+    Calculates from OC date to date_delivered.
+    Queries underlying tables directly to avoid company_code subquery issues
+    and to get accurate delivery-level COUNT (not line-level).
     
     Args:
         product_id: Product ID
-        entity_id: Entity ID
-        customer_id: Optional customer ID
+        entity_id: Entity ID (seller_company_id)
+        customer_id: Optional customer ID (buyer_company_id)
         
     Returns:
         Dictionary with lead time estimates
@@ -194,21 +197,29 @@ def get_lead_time_estimate(
     try:
         engine = get_db_engine()
         
-        # Query actual delivery times from OC date to delivery date
+        # Query underlying tables directly:
+        # - Use seller_company_id / buyer_company_id (IDs, not codes)
+        # - COUNT(DISTINCT sod.id) to count deliveries, not lines
+        # - sod.date_delivered is the actual column name in stock_out_delivery
         query = text("""
         SELECT 
-            AVG(DATEDIFF(delivered_date, oc_date)) as avg_lead_time_days,
-            MIN(DATEDIFF(delivered_date, oc_date)) as min_lead_time_days,
-            MAX(DATEDIFF(delivered_date, oc_date)) as max_lead_time_days,
-            COUNT(*) as sample_size
-        FROM delivery_full_view
-        WHERE product_id = :product_id
-            AND legal_entity_code = (SELECT company_code FROM companies WHERE id = :entity_id)
-            AND shipment_status = 'DELIVERED'
-            AND delivered_date IS NOT NULL
-            AND oc_date IS NOT NULL
-            AND DATEDIFF(delivered_date, oc_date) > 0
-            AND DATEDIFF(delivered_date, oc_date) < 365
+            AVG(DATEDIFF(sod.date_delivered, oc.oc_date))    AS avg_lead_time_days,
+            MIN(DATEDIFF(sod.date_delivered, oc.oc_date))    AS min_lead_time_days,
+            MAX(DATEDIFF(sod.date_delivered, oc.oc_date))    AS max_lead_time_days,
+            COUNT(DISTINCT sod.id)                            AS sample_size
+        FROM stock_out_delivery sod
+        JOIN stock_out_delivery_request_details sodrd
+            ON sodrd.delivery_id = sod.id AND sodrd.delete_flag = 0
+        JOIN order_confirmations oc
+            ON sodrd.order_confirmation_id = oc.id AND oc.delete_flag = 0
+        WHERE sod.seller_company_id  = :entity_id
+            AND sodrd.product_id     = :product_id
+            AND sod.shipment_status  = 'DELIVERED'
+            AND sod.date_delivered   IS NOT NULL
+            AND oc.oc_date           IS NOT NULL
+            AND sod.delete_flag      = 0
+            AND DATEDIFF(sod.date_delivered, oc.oc_date) > 0
+            AND DATEDIFF(sod.date_delivered, oc.oc_date) < 365
         """)
         
         params = {'product_id': product_id, 'entity_id': entity_id}
@@ -256,4 +267,3 @@ def format_demand_summary(stats: Dict) -> str:
     summary = f"Analysis complete: {stats['data_points']} data points analyzed"
     
     return summary
-

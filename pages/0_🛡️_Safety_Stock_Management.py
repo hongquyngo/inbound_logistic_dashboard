@@ -246,13 +246,25 @@ def get_quick_stats():
         engine = get_db_engine()
         query = text("""
         SELECT
-            COUNT(DISTINCT s.id) as total_items,
-            COUNT(DISTINCT CASE WHEN s.customer_id IS NOT NULL THEN s.id END) as customer_rules,
+            COUNT(DISTINCT s.id)                                                          AS total_items,
+            COUNT(DISTINCT CASE WHEN s.customer_id IS NOT NULL THEN s.id END)             AS customer_rules,
             COUNT(DISTINCT CASE
                 WHEN ssp.last_calculated_date < DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
                   OR ssp.last_calculated_date IS NULL
-                THEN s.id END) as needs_review,
-            COUNT(DISTINCT s.product_id) as unique_products
+                THEN s.id END)                                                             AS needs_review,
+            COUNT(DISTINCT s.product_id)                                                   AS unique_products,
+            -- Rules expiring within 30 days
+            COUNT(DISTINCT CASE
+                WHEN s.effective_to IS NOT NULL
+                  AND s.effective_to BETWEEN CURRENT_DATE() AND DATE_ADD(CURRENT_DATE(), INTERVAL 30 DAY)
+                THEN s.id END)                                                             AS expiring_soon,
+            -- Rules with no reorder point set
+            COUNT(DISTINCT CASE
+                WHEN s.reorder_point IS NULL OR s.reorder_point = 0
+                THEN s.id END)                                                             AS no_reorder_point,
+            -- FIXED method count and percentage
+            COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'FIXED' OR ssp.calculation_method IS NULL
+                THEN s.id END)                                                             AS fixed_method_count
         FROM safety_stock_levels s
         LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
         WHERE s.delete_flag = 0 AND s.is_active = 1
@@ -318,16 +330,46 @@ def fetch_and_store_demand_data(product_id, entity_id, customer_id, fetch_days, 
 def render_stats():
     """Renders KPI metrics independently – does not rerun when filters change"""
     stats = get_quick_stats()
-    if stats:
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Active Rules",     stats.total_items    or 0)
-        with col2:
-            st.metric("Customer Rules",   stats.customer_rules or 0)
-        with col3:
-            st.metric("Needs Review",     stats.needs_review   or 0)
-        with col4:
-            st.metric("Unique Products",  stats.unique_products or 0)
+    if not stats:
+        return
+
+    total = stats.total_items or 0
+
+    # ── Row 1: Core metrics ───────────────────────────────────────────────────
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Active Rules", total)
+    with col2:
+        st.metric("Customer Rules", stats.customer_rules or 0)
+    with col3:
+        nr = stats.needs_review or 0
+        st.metric("Needs Review", nr, delta=f"⚠️ {nr} overdue" if nr > 0 else None,
+                  delta_color="inverse")
+    with col4:
+        st.metric("Unique Products", stats.unique_products or 0)
+
+    # ── Row 2: Data quality / alerts ─────────────────────────────────────────
+    col5, col6, col7, col8 = st.columns(4)
+    with col5:
+        exp = stats.expiring_soon or 0
+        st.metric("Expiring in 30d", exp,
+                  delta="⚠️ Action needed" if exp > 0 else None,
+                  delta_color="inverse")
+    with col6:
+        no_rop = stats.no_reorder_point or 0
+        st.metric("No Reorder Point", no_rop,
+                  delta="Data gap" if no_rop > 0 else "✅ Complete",
+                  delta_color="inverse" if no_rop > 0 else "off")
+    with col7:
+        fixed = stats.fixed_method_count or 0
+        fixed_pct = round(fixed / total * 100) if total > 0 else 0
+        st.metric("Manual (FIXED)", f"{fixed} ({fixed_pct}%)",
+                  delta="Consider auto-calc" if fixed_pct > 70 else None,
+                  delta_color="off")
+    with col8:
+        auto = total - (stats.fixed_method_count or 0)
+        auto_pct = round(auto / total * 100) if total > 0 else 0
+        st.metric("Auto-Calculated", f"{auto} ({auto_pct}%)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -418,7 +460,7 @@ def render_data_section():
     which also refreshes this fragment with fresh data.
     """
 
-    # ── Filters ───────────────────────────────────────────────────────────────
+    # ── Filters Row 1 ─────────────────────────────────────────────────────────
     with st.container():
         st.subheader("Filters")
         col1, col2, col3, col4 = st.columns(4)
@@ -433,8 +475,6 @@ def render_data_section():
 
         with col2:
             base_customer_opts = ['All Customers', 'General Rules Only'] + existing['customers']
-
-            # Restrict customer role to their own data
             if get_user_role() == 'customer':
                 session_cid = st.session_state.get('customer_id')
                 if session_cid:
@@ -465,13 +505,48 @@ def render_data_section():
             sel_status  = st.selectbox("Status", list(STATUS_MAP.keys()), index=0, key="flt_status")
             status      = STATUS_MAP[sel_status]
 
+    # ── Filters Row 2: Advanced ────────────────────────────────────────────────
+    with st.container():
+        col5, col6, col7, col8 = st.columns(4)
+
+        with col5:
+            METHOD_FILTER_MAP = {
+                'All Methods': None,
+                'FIXED (Manual)': 'FIXED',
+                'Days of Supply': 'DAYS_OF_SUPPLY',
+                'Lead Time Based': 'LEAD_TIME_BASED'
+            }
+            sel_method    = st.selectbox("Calculation Method", list(METHOD_FILTER_MAP.keys()), key="flt_method")
+            method_filter = METHOD_FILTER_MAP[sel_method]
+
+        with col6:
+            needs_review_only = st.checkbox(
+                "⚠️ Needs Review Only",
+                value=False, key="flt_needs_review",
+                help="Show only rules not reviewed in the last 30 days"
+            )
+
+        with col7:
+            expiring_only = st.checkbox(
+                "📅 Expiring in 30 Days",
+                value=False, key="flt_expiring",
+                help="Show rules whose effective_to is within the next 30 days"
+            )
+
+        with col8:
+            no_rop_only = st.checkbox(
+                "🔴 No Reorder Point",
+                value=False, key="flt_no_rop",
+                help="Show rules missing a reorder point"
+            )
+
     # ── Action buttons ─────────────────────────────────────────────────────────
     st.divider()
     col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         if st.button(
-            "Add Safety Stock", type="primary", use_container_width=True,
+            "➕ Add Safety Stock", type="primary", use_container_width=True,
             disabled=not has_permission('create')
         ):
             st.session_state.dialog_data = {}
@@ -479,30 +554,48 @@ def render_data_section():
 
     with col2:
         if st.button(
-            "Bulk Upload", use_container_width=True,
+            "📤 Bulk Upload", use_container_width=True,
             disabled=not has_permission('bulk_upload')
         ):
             bulk_upload_dialog()
 
     with col3:
-        if st.button("Export Excel", use_container_width=True):
-            _handle_export(entity_id, customer_id, product_id, status)
-
-    with col4:
-        if st.button("Review Report", use_container_width=True):
-            report = generate_review_report()
+        # Single button that prepares and downloads immediately
+        query_cid_exp = None if customer_id == 'general' else customer_id
+        exp_kwargs = dict(entity_id=entity_id, customer_id=query_cid_exp, status=status)
+        if product_id:
+            exp_kwargs['product_id'] = product_id
+        export_df = get_safety_stock_levels(**exp_kwargs)
+        export_df = filter_data_for_customer(export_df)
+        export_df, was_limited = apply_export_limit(export_df)
+        if not export_df.empty:
+            excel_bytes = export_to_excel(export_df)
             st.download_button(
-                "Download",
-                report,
-                f"review_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                "📥 Export Excel",
+                excel_bytes,
+                f"safety_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
+            if was_limited:
+                st.caption(f"Limited to {len(export_df)} rows")
+        else:
+            st.button("📥 Export Excel", use_container_width=True, disabled=True)
+
+    with col4:
+        report_bytes = generate_review_report()
+        st.download_button(
+            "📊 Review Report",
+            report_bytes,
+            f"review_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
 
     with col5:
-        if st.button("Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", use_container_width=True):
             st.cache_data.clear()
-            st.rerun(scope="fragment")   # ← only this fragment reruns
+            st.rerun(scope="fragment")
 
     # ── Data table ─────────────────────────────────────────────────────────────
     st.divider()
@@ -515,17 +608,74 @@ def render_data_section():
     df = get_safety_stock_levels(**fetch_kwargs)
     df = filter_data_for_customer(df)
 
+    # ── Apply advanced filters client-side ────────────────────────────────────
+    if method_filter and 'calculation_method' in df.columns:
+        df = df[df['calculation_method'] == method_filter]
+
+    if needs_review_only and 'last_calculated_date' in df.columns:
+        cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+        df = df[df['last_calculated_date'].isna() | (pd.to_datetime(df['last_calculated_date']) < cutoff)]
+
+    if expiring_only and 'effective_to' in df.columns:
+        today = pd.Timestamp.now().normalize()
+        in_30 = today + pd.Timedelta(days=30)
+        df = df[
+            df['effective_to'].notna() &
+            (pd.to_datetime(df['effective_to']) >= today) &
+            (pd.to_datetime(df['effective_to']) <= in_30)
+        ]
+
+    if no_rop_only and 'reorder_point' in df.columns:
+        df = df[df['reorder_point'].isna() | (df['reorder_point'] == 0)]
+
     if df.empty:
         st.info("No records found. Adjust filters or add a new safety stock rule.")
         return
 
-    display_cols = [
-        'pt_code', 'product_name', 'entity_code', 'customer_code',
-        'safety_stock_qty', 'reorder_point', 'calculation_method',
-        'rule_type', 'status', 'effective_from', 'priority_level'
-    ]
-    display_df = df[[c for c in display_cols if c in df.columns]].copy()
-    display_df['customer_code'] = display_df['customer_code'].fillna('All')
+    # ── Expiry alert banner ───────────────────────────────────────────────────
+    if 'effective_to' in df.columns:
+        today_ts = pd.Timestamp.now().normalize()
+        expiring_df = df[
+            df['effective_to'].notna() &
+            (pd.to_datetime(df['effective_to']) >= today_ts) &
+            (pd.to_datetime(df['effective_to']) <= today_ts + pd.Timedelta(days=30))
+        ]
+        if not expiring_df.empty and not expiring_only:
+            st.warning(
+                f"📅 **{len(expiring_df)} rule(s) expiring within 30 days** — "
+                f"check the *Expiring in 30 Days* filter to review them."
+            )
+
+    # ── Build display dataframe ───────────────────────────────────────────────
+    METHOD_ABBREV = {
+        'FIXED':           'FIXED',
+        'DAYS_OF_SUPPLY':  'DOS',
+        'LEAD_TIME_BASED': 'LTB',
+    }
+
+    display_df = pd.DataFrame()
+    display_df['PT Code']          = df['pt_code'] if 'pt_code' in df.columns else ''
+    display_df['Product Name']     = df['product_name'] if 'product_name' in df.columns else ''
+    display_df['Brand']            = df['brand_name'] if 'brand_name' in df.columns else ''
+    display_df['Entity']           = df['entity_code'] if 'entity_code' in df.columns else ''
+    display_df['Customer']         = df['customer_code'].fillna('All') if 'customer_code' in df.columns else 'All'
+    display_df['SS Qty']           = df['safety_stock_qty'] if 'safety_stock_qty' in df.columns else 0
+    display_df['Reorder Point']    = df['reorder_point'].apply(
+        lambda x: '—' if pd.isna(x) or x == 0 else f"{x:.0f}"
+    ) if 'reorder_point' in df.columns else '—'
+    display_df['Method']           = df['calculation_method'].map(
+        lambda x: METHOD_ABBREV.get(x, x or 'FIXED')
+    ) if 'calculation_method' in df.columns else 'FIXED'
+    display_df['Rule Type']        = df['rule_type'] if 'rule_type' in df.columns else ''
+    display_df['Status']           = df['status'] if 'status' in df.columns else ''
+    display_df['Effective Period'] = df.apply(
+        lambda r: f"{r.get('effective_from', '')} → {r.get('effective_to', '') or 'ongoing'}",
+        axis=1
+    )
+    display_df['Priority']         = df['priority_level'] if 'priority_level' in df.columns else 100
+    display_df['Last Calculated']  = df['last_calculated_date'].apply(
+        lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else '—'
+    ) if 'last_calculated_date' in df.columns else '—'
 
     st.subheader(f"Safety Stock Rules ({len(df)} records)")
 
@@ -543,83 +693,127 @@ def render_data_section():
     idx    = selected.selection.rows[0]
     record = df.iloc[idx]
 
-    # ── Row actions ────────────────────────────────────────────────────────────
+    # ── Selected record info ──────────────────────────────────────────────────
     st.divider()
-    st.subheader("Actions")
+    info_cols = st.columns(5)
+    info_cols[0].markdown(f"**PT Code:** {record.get('pt_code', '—')}")
+    info_cols[1].markdown(f"**Product:** {str(record.get('product_name', '—'))[:40]}")
+    info_cols[2].markdown(f"**SS Qty:** {safe_float(record.get('safety_stock_qty')):.0f}")
+    rop_val = record.get('reorder_point')
+    info_cols[3].markdown(f"**Reorder Point:** {'—' if pd.isna(rop_val) or rop_val == 0 else f'{rop_val:.0f}'}")
+    info_cols[4].markdown(f"**Method:** {METHOD_ABBREV.get(record.get('calculation_method'), record.get('calculation_method') or 'FIXED')}")
 
+    # ── Row actions ────────────────────────────────────────────────────────────
+    st.subheader("Actions")
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        if st.button("Edit", use_container_width=True, disabled=not has_permission('edit')):
+        if st.button("✏️ Edit", use_container_width=True, disabled=not has_permission('edit')):
             st.session_state.dialog_data = {}
             safety_stock_form('edit', record['id'])
 
     with col2:
-        if st.button("Review", use_container_width=True, disabled=not has_permission('review')):
+        if st.button("📋 Review", use_container_width=True, disabled=not has_permission('review')):
             review_dialog(record['id'])
 
     with col3:
-        if st.button("History", use_container_width=True):
-            history = get_review_history(record['id'])
-            if not history.empty:
-                st.dataframe(history, use_container_width=True)
-            else:
-                st.info("No review history found")
+        if st.button("📊 Compare vs Inventory", use_container_width=True):
+            st.session_state['compare_record_id'] = int(record['id'])
 
     with col4:
-        # st.form batches checkbox + button into a single interaction
-        with st.form("delete_confirm_form", border=False):
-            confirm_del = st.checkbox(
-                "Confirm delete?", key="del_confirm_check",
-                help="Check this box then click Delete to confirm"
-            )
-            submitted_del = st.form_submit_button(
-                "Delete",
-                use_container_width=True,
-                type="secondary",
-                disabled=not has_permission('delete')
-            )
+        if st.button("🗑️ Delete", use_container_width=True,
+                     disabled=not has_permission('delete'),
+                     type="secondary"):
+            st.session_state['pending_delete_id'] = int(record['id'])
 
-        if submitted_del:
-            if confirm_del:
+    # ── Delete confirmation (popover-style inline) ────────────────────────────
+    if st.session_state.get('pending_delete_id') == int(record['id']):
+        st.error(
+            f"⚠️ Delete safety stock rule for **{record.get('pt_code')}** "
+            f"({record.get('customer_code') or 'General Rule'})? This cannot be undone."
+        )
+        yes_col, no_col, _ = st.columns([1, 1, 4])
+        with yes_col:
+            if st.button("✅ Yes, Delete", type="primary", use_container_width=True, key="del_yes"):
                 success, msg = delete_safety_stock(int(record['id']), st.session_state.username)
                 if success:
                     log_action('DELETE', f"Deleted safety stock ID {record['id']}")
-                    st.success("Deleted successfully")
+                    st.session_state.pop('pending_delete_id', None)
                     st.cache_data.clear()
-                    st.rerun(scope="fragment")  # ← refresh table inside fragment
+                    st.rerun(scope="fragment")
                 else:
                     st.error(msg)
-            else:
-                st.warning("⚠️ Please check the confirmation box before deleting")
+        with no_col:
+            if st.button("❌ Cancel", use_container_width=True, key="del_no"):
+                st.session_state.pop('pending_delete_id', None)
+                st.rerun(scope="fragment")
+
+    # ── Review History expander ───────────────────────────────────────────────
+    with st.expander("📜 Review History", expanded=False):
+        history = get_review_history(int(record['id']))
+        if not history.empty:
+            st.dataframe(history, use_container_width=True, hide_index=True)
+        else:
+            st.info("No review history found for this rule.")
+
+    # ── Compare vs Inventory panel ────────────────────────────────────────────
+    if st.session_state.get('compare_record_id') == int(record['id']):
+        _render_compare_panel(record)
 
 
-def _handle_export(entity_id, customer_id, product_id, status):
-    """Export helper – called from within render_data_section fragment"""
-    export_customer_id = None if customer_id == 'general' else customer_id
-    export_kwargs = dict(entity_id=entity_id, customer_id=export_customer_id, status=status)
-    if product_id:
-        export_kwargs['product_id'] = product_id
+def _render_compare_panel(record):
+    """Inline compare panel: Safety Stock vs actual inventory"""
+    st.divider()
+    st.markdown("#### 📊 Compare: Safety Stock vs Current Inventory")
 
-    df = get_safety_stock_levels(**export_kwargs)
-    df = filter_data_for_customer(df)
-    df, was_limited = apply_export_limit(df)
+    try:
+        engine = get_db_engine()
+        inv_query = text("""
+        SELECT
+            w.name                     AS warehouse,
+            SUM(ih.remain)             AS qty_on_hand,
+            COUNT(DISTINCT ih.id)      AS lot_count
+        FROM inventory_histories ih
+        JOIN warehouses w ON ih.warehouse_id = w.id
+        WHERE ih.product_id = :product_id
+          AND ih.delete_flag = 0
+          AND ih.remain > 0
+        GROUP BY w.id, w.name
+        ORDER BY qty_on_hand DESC
+        """)
+        with engine.connect() as conn:
+            inv_df = pd.read_sql(inv_query, conn, params={'product_id': int(record['product_id'])})
 
-    if was_limited:
-        st.warning(f"Export limited to {len(df)} rows based on your role")
+        ss_qty  = safe_float(record.get('safety_stock_qty'))
+        rop_val = safe_float(record.get('reorder_point'))
+        total_inventory = inv_df['qty_on_hand'].sum() if not inv_df.empty else 0
 
-    if not df.empty:
-        excel_file = export_to_excel(df)
-        st.download_button(
-            "Download",
-            excel_file,
-            f"safety_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
-        log_action('EXPORT', f"Exported {len(df)} records")
-    else:
-        st.warning("No data to export with current filters")
+        # Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Safety Stock Target", f"{ss_qty:.0f}")
+        m2.metric("Total On Hand",       f"{total_inventory:.0f}",
+                  delta=f"{total_inventory - ss_qty:+.0f} vs SS",
+                  delta_color="normal")
+        m3.metric("Reorder Point",       f"{rop_val:.0f}" if rop_val else "—")
+        if rop_val and total_inventory > 0:
+            rop_status = "✅ Above ROP" if total_inventory >= rop_val else "🔴 Below ROP — Reorder Now!"
+            m4.metric("ROP Status", rop_status)
+        else:
+            m4.metric("ROP Status", "—")
+
+        if not inv_df.empty:
+            st.dataframe(inv_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No inventory found for this product across all warehouses.")
+
+        if st.button("Close Compare", key="close_compare"):
+            st.session_state.pop('compare_record_id', None)
+            st.rerun(scope="fragment")
+
+    except Exception as e:
+        st.error(f"Could not load inventory data: {e}")
+        logger.error(f"Compare panel error: {e}")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -795,6 +989,14 @@ def safety_stock_form(mode: str = 'add', record_id=None):
         # Persist selected method so it survives fragment reruns
         st.session_state.dialog_data['selected_method'] = calculation_method
 
+        # Clear stale calculation results if user switched to a different method
+        if ctx.get('calc_method') and ctx['calc_method'] != calculation_method:
+            for stale_key in ('calculated_ss', 'calculated_rop', 'formula_used',
+                              'calc_safety_days', 'calc_avg_demand', 'calc_lead_time',
+                              'calc_std_dev', 'calc_sl'):
+                ctx.pop(stale_key, None)
+            st.info(f"ℹ️ Switched to **{calculation_method}** — previous results cleared. Please recalculate.")
+
         demand_stats  = ctx.get('demand_stats', {})
         has_auto_data = bool(demand_stats and demand_stats.get('data_points', 0) > 0)
 
@@ -963,10 +1165,33 @@ def safety_stock_form(mode: str = 'add', record_id=None):
 
     # ── Save / Cancel (outside tabs, at dialog level) ─────────────────────────
     st.divider()
+
+    # Calculation result summary always visible near Save
+    ctx = st.session_state.dialog_data
+    if 'calculated_ss' in ctx:
+        saved_m = ctx.get('calc_method', '—')
+        abbrev  = {'FIXED': 'FIXED', 'DAYS_OF_SUPPLY': 'DOS', 'LEAD_TIME_BASED': 'LTB'}.get(saved_m, saved_m)
+        sum_cols = st.columns(4)
+        sum_cols[0].metric("Calculated SS",    f"{ctx['calculated_ss']:.2f}")
+        sum_cols[1].metric("Reorder Point",    f"{ctx['calculated_rop']:.2f}")
+        sum_cols[2].metric("Method Used",      abbrev)
+        if 'formula_used' in ctx:
+            sum_cols[3].caption(f"Formula: {ctx['formula_used']}")
+
+        # Warn if dropdown method doesn't match calculated method
+        if ctx.get('calc_method') and ctx['calc_method'] != calculation_method:
+            st.warning(
+                f"⚠️ Method mismatch: results are from **{ctx['calc_method']}** "
+                f"but dropdown is set to **{calculation_method}**. "
+                f"Please recalculate before saving."
+            )
+    else:
+        st.info("ℹ️ Use the Calculate / Apply Values button in the *Stock Levels & Calculation* tab, then save.")
+
     col1, col2, col3 = st.columns([1, 1, 2])
 
     with col1:
-        if st.button("Save", type="primary", use_container_width=True, key="dlg_save"):
+        if st.button("💾 Save", type="primary", use_container_width=True, key="dlg_save"):
             _save_safety_stock(
                 mode=mode,
                 record_id=record_id,
@@ -981,13 +1206,13 @@ def safety_stock_form(mode: str = 'add', record_id=None):
             )
 
     with col2:
-        if st.button("Cancel", use_container_width=True, key="dlg_cancel"):
+        if st.button("✖ Cancel", use_container_width=True, key="dlg_cancel"):
             st.session_state.dialog_data = {}
             st.rerun()
 
     with col3:
         if mode == 'edit' and has_permission('review'):
-            if st.button("Create Review", use_container_width=True, key="dlg_review"):
+            if st.button("📋 Create Review", use_container_width=True, key="dlg_review"):
                 review_dialog(record_id)
 
 
@@ -1012,8 +1237,17 @@ def _save_safety_stock(mode, record_id, product_id, entity_id, customer_id,
         st.error("Please use the Calculate / Apply Values button before saving")
         return
 
-    # Build calc_params from stored results
+    # Guard: method selected in widget must match what was actually calculated.
+    # Prevents saving LEAD_TIME_BASED method with FIXED calculation results
+    # (e.g. user changed method dropdown without recalculating).
     saved_method = ctx.get('calc_method', calculation_method)
+    if saved_method != calculation_method:
+        st.error(
+            f"⚠️ Method mismatch: you selected **{calculation_method}** but the last "
+            f"calculation used **{saved_method}**. "
+            f"Please recalculate with the selected method before saving."
+        )
+        return
     calc_params  = {'calculation_method': saved_method}
 
     if saved_method == 'DAYS_OF_SUPPLY':
@@ -1052,7 +1286,9 @@ def _save_safety_stock(mode, record_id, product_id, entity_id, customer_id,
     )
 
     if not is_valid:
-        st.error(get_validation_summary(errors))
+        st.error("**Validation failed — please fix the following issues:**")
+        for err in errors:
+            st.markdown(f"- {err}")
         return
 
     if mode == 'add':
@@ -1078,7 +1314,8 @@ def _save_safety_stock(mode, record_id, product_id, entity_id, customer_id,
 @st.dialog("Review Safety Stock", width="large")
 def review_dialog(safety_stock_id):
     """
-    Review dialog – all inputs wrapped in st.form so only Submit triggers rerun.
+    Review dialog – quantity input is outside the form so auto_action
+    can react to it before form submission.
     """
     if not has_permission('review'):
         st.error(get_permission_message('review'))
@@ -1090,65 +1327,78 @@ def review_dialog(safety_stock_id):
         return
 
     st.markdown("### 📋 Safety Stock Review")
-    st.info("ℹ️ Document any changes to safety stock quantity with a clear reason.")
 
-    # Current info (read-only, outside form)
-    st.subheader("Current Information")
+    # ── Current info ──────────────────────────────────────────────────────────
     ci1, ci2, ci3, ci4 = st.columns(4)
     with ci1:
         st.metric("Product",     current_data.get('pt_code', 'N/A'))
     with ci2:
         st.metric("Entity",      current_data.get('entity_name', 'N/A')[:20])
     with ci3:
-        st.metric("Current Qty", f"{safe_float(current_data.get('safety_stock_qty')):.0f}")
+        st.metric("Current SS",  f"{safe_float(current_data.get('safety_stock_qty')):.0f}")
     with ci4:
         st.metric("Method",      current_data.get('calculation_method', 'FIXED'))
 
-    with st.expander("View Current Settings", expanded=False):
+    with st.expander("View Full Settings", expanded=False):
         info_col1, info_col2 = st.columns(2)
         with info_col1:
             st.write(f"**Reorder Point:** {safe_float(current_data.get('reorder_point', 0)):.0f}")
             st.write(f"**Effective From:** {current_data.get('effective_from')}")
             st.write(f"**Priority:** {current_data.get('priority_level')}")
+            if current_data.get('formula_used'):
+                st.write(f"**Formula:** {current_data['formula_used']}")
         with info_col2:
             st.write(f"**Effective To:** {current_data.get('effective_to') or 'Ongoing'}")
             st.write(f"**Customer:** {current_data.get('customer_name') or 'General Rule'}")
+            if current_data.get('last_calculated_date'):
+                st.write(f"**Last Calculated:** {current_data['last_calculated_date']}")
+
+    st.info(
+        "ℹ️ If you need to recalculate safety stock with a new method, "
+        "close this dialog and use **Edit** instead."
+    )
 
     st.divider()
     st.subheader("Review Decision")
 
     old_qty = safe_float(current_data.get('safety_stock_qty'))
 
-    # All review inputs in one form – only Submit triggers rerun
+    # ── New quantity OUTSIDE form so auto_action updates reactively ───────────
+    new_qty = st.number_input(
+        "New Safety Stock Quantity *",
+        min_value=0.0, step=1.0, value=old_qty,
+        help="Adjust quantity based on performance review",
+        key="rv_new_qty"
+    )
+
+    # Auto-detect action from current widget value (updates live, before submit)
+    if new_qty > old_qty:
+        auto_action = 'INCREASED'
+        change_val  = new_qty - old_qty
+        pct         = (change_val / old_qty * 100) if old_qty > 0 else 0
+        st.success(f"↑ Increase: +{change_val:.0f} units (+{pct:.1f}%)")
+    elif new_qty < old_qty:
+        auto_action = 'DECREASED'
+        change_val  = new_qty - old_qty
+        pct         = (change_val / old_qty * 100) if old_qty > 0 else 0
+        st.warning(f"↓ Decrease: {change_val:.0f} units ({pct:.1f}%)")
+    else:
+        auto_action = 'NO_CHANGE'
+        st.info("No quantity change — documenting review only.")
+
+    # ── Rest of inputs in form ────────────────────────────────────────────────
     with st.form("review_form", border=True):
         col1, col2 = st.columns(2)
 
         with col1:
-            new_qty = st.number_input(
-                "New Safety Stock Quantity *",
-                min_value=0.0, step=1.0, value=old_qty,
-                help="Adjust quantity based on performance review",
-                key="rv_new_qty"
-            )
-
-            # Auto-detect action from quantity change (displayed after form submit)
-            if new_qty > old_qty:
-                auto_action = 'INCREASED'
-            elif new_qty < old_qty:
-                auto_action = 'DECREASED'
-            else:
-                auto_action = 'NO_CHANGE'
-
             action_options = ['NO_CHANGE', 'INCREASED', 'DECREASED', 'METHOD_CHANGED']
             action_taken = st.selectbox(
                 "Action *",
                 options=action_options,
                 index=action_options.index(auto_action),
-                help="Auto-detected from quantity change",
+                help="Auto-detected from quantity change above — adjust if needed",
                 key="rv_action"
             )
-
-        with col2:
             review_type = st.selectbox(
                 "Review Type",
                 options=['PERIODIC', 'EXCEPTION', 'EMERGENCY', 'ANNUAL'],
@@ -1156,9 +1406,10 @@ def review_dialog(safety_stock_id):
                 key="rv_type"
             )
 
+        with col2:
             action_reason = st.text_area(
                 "Reason for Change *",
-                height=110,
+                height=130,
                 placeholder="Example: Had 3 stockouts last month due to increased demand...",
                 help="⚠️ REQUIRED – minimum 10 characters",
                 key="rv_reason"
@@ -1174,23 +1425,15 @@ def review_dialog(safety_stock_id):
         if has_permission('approve'):
             approve_review = st.checkbox("✅ Approve this review", key="rv_approve")
 
-        # Change summary (inside form so it shows before submit)
-        if new_qty != old_qty:
-            change = new_qty - old_qty
-            pct    = (change / old_qty * 100) if old_qty > 0 else 0
-            if change > 0:
-                st.success(f"↑ Increase: +{change:.0f} units (+{pct:.1f}%)")
-            else:
-                st.warning(f"↓ Decrease: {change:.0f} units ({pct:.1f}%)")
-        else:
-            st.info("No quantity change")
+        sub_col1, sub_col2 = st.columns([3, 1])
+        with sub_col1:
+            submitted = st.form_submit_button(
+                "✅ Submit Review", type="primary", use_container_width=True
+            )
+        with sub_col2:
+            cancelled = st.form_submit_button("✖ Cancel", use_container_width=True)
 
-        submitted = st.form_submit_button(
-            "Submit Review", type="primary", use_container_width=True
-        )
-
-    # Cancel button outside form (no form baggage)
-    if st.button("Cancel", use_container_width=True, key="rv_cancel"):
+    if cancelled:
         st.rerun()
 
     # Process submit
@@ -1200,10 +1443,10 @@ def review_dialog(safety_stock_id):
             return
 
         if action_taken == 'INCREASED' and new_qty <= old_qty:
-            st.error("Action is INCREASED but quantity didn't increase")
+            st.error("Action is INCREASED but new quantity is not greater than current quantity.")
             return
         elif action_taken == 'DECREASED' and new_qty >= old_qty:
-            st.error("Action is DECREASED but quantity didn't decrease")
+            st.error("Action is DECREASED but new quantity is not less than current quantity.")
             return
 
         review_data = {

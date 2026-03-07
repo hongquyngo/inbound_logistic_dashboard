@@ -388,7 +388,8 @@ def _update_parameters_if_needed(conn, safety_stock_id: int, data: Dict):
     """Helper to update calculation parameters if needed"""
     param_fields = [
         'calculation_method', 'lead_time_days', 'safety_days',
-        'service_level_percent', 'avg_daily_demand', 'demand_std_deviation'
+        'service_level_percent', 'avg_daily_demand', 'demand_std_deviation',
+        'formula_used'
     ]
     
     if not any(field in data for field in param_fields):
@@ -656,4 +657,3 @@ def get_review_history(safety_stock_id: int) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error fetching review history: {e}")
         return pd.DataFrame()
-
