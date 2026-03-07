@@ -188,9 +188,9 @@ def _fetch_exchange_rate(currency_code: str) -> Optional[float]:
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read())
         if data.get("result") == "success":
-            # API returns: 1 USD = X currency  →  we need 1 currency = Y USD
-            usd_per_currency = 1.0 / data["conversion_rate"]
-            return round(usd_per_currency, 10)
+            # API returns: 1 USD = X currency  (e.g. 1 USD = 26134 VND)
+            # DB stores this same convention: usd_*_exchange_rate = 1 USD = X currency
+            return round(float(data["conversion_rate"]), 10)
         logger.warning(f"Exchange rate API error for {currency_code}: {data}")
         return None
     except Exception as e:
@@ -461,7 +461,7 @@ def create_cost_dialog():
             initial_rate = cur_usd_rate
 
         usd_rate = st.number_input(
-            f"Rate: 1 {sel_ccy_code} = ? USD",
+            f"Rate: 1 USD = ? {sel_ccy_code}",
             value=float(initial_rate) if initial_rate else 0.0,
             min_value=0.0,
             format="%.10f",
@@ -469,9 +469,9 @@ def create_cost_dialog():
             help="Auto-fetched from exchange rate API. You can adjust manually if needed.",
         )
         if fetched_rate:
-            st.caption(f"🔄 Auto-fetched: 1 {sel_ccy_code} = {fetched_rate:.8f} USD")
+            st.caption(f"🔄 Auto-fetched: 1 USD = {fetched_rate:.8f} {sel_ccy_code}")
         elif cur_usd_rate > 0:
-            st.caption(f"✅ Current CAN rate: 1 {sel_ccy_code} = {cur_usd_rate:.8f} USD")
+            st.caption(f"✅ Current CAN rate: 1 USD = {cur_usd_rate:.8f} {sel_ccy_code}")
 
     if currency_changed and cur_ccy_code:
         st.warning(
@@ -490,7 +490,7 @@ def create_cost_dialog():
         )
         # Show USD equivalent
         if usd_rate > 0 and sel_ccy_code != "USD":
-            st.caption(f"≈ **USD {amount * usd_rate:,.2f}**")
+            st.caption(f"≈ **USD {amount / usd_rate:,.2f}**")
     with vendor_col:
         vendors_df = _cached_vendors()
         vendor_map = {"— Not specified —": None}
@@ -531,7 +531,7 @@ def create_cost_dialog():
 
     # ── Step 5: Anomaly check (preview before save) ───────────────────────────
     if amount > 0.01 and usd_rate > 0:
-        amount_usd = amount * usd_rate
+        amount_usd = amount / usd_rate if sel_ccy_code != "USD" else amount
         goods_value_usd = get_arrival_goods_value_usd(sel_arr_id)
         if goods_value_usd > 0:
             # Fetch existing logistic costs for this arrival

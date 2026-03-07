@@ -238,7 +238,7 @@ def update_arrival_currency(
     arrival_id:    int,
     category:      str,    # 'INTERNATIONAL' | 'LOCAL'
     currency_id:   int,
-    exchange_rate: float,  # 1 unit of currency = exchange_rate USD
+    exchange_rate: float,  # 1 USD = exchange_rate units of currency (e.g. 26134 for VND)
 ) -> Tuple[bool, str]:
     """
     Update currency + USD exchange rate on arrivals record.
