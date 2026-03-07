@@ -1561,11 +1561,19 @@ def bulk_upload_dialog():
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
+def render_help_popover():
+    """Proxy — delegates to utils.safety_stock.help (separated for maintainability)"""
+    from utils.safety_stock.help import render_help_popover as _render
+    _render()
+
+
 def main():
     # ── Header ─────────────────────────────────────────────────────────────────
-    col_title, col_user = st.columns([3, 1])
+    col_title, col_help, col_user = st.columns([3, 1, 1])
     with col_title:
         st.title("🛡️ Safety Stock Management")
+    with col_help:
+        render_help_popover()
     with col_user:
         st.caption(get_user_info_display())
 
