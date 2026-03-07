@@ -27,7 +27,9 @@ from utils.safety_stock.crud import (
     delete_safety_stock,
     create_safety_stock_review,
     get_review_history,
-    bulk_create_safety_stock
+    bulk_create_safety_stock,
+    get_review_history_analytics,
+    get_coverage_analysis,
 )
 from utils.safety_stock.calculations import (
     calculate_safety_stock,
@@ -505,7 +507,7 @@ def render_data_section():
 
     # ── Filters Row 2: Advanced ────────────────────────────────────────────────
     with st.container():
-        col5, col6, col7, col8 = st.columns(4)
+        col5, col6, col7, col8, col9 = st.columns(5)
 
         with col5:
             METHOD_FILTER_MAP = {
@@ -536,6 +538,13 @@ def render_data_section():
                 "🔴 No Reorder Point",
                 value=False, key="flt_no_rop",
                 help="Show rules missing a reorder point"
+            )
+
+        with col9:
+            has_reviews_only = st.checkbox(
+                "📋 Has Reviews",
+                value=False, key="flt_has_reviews",
+                help="Show only rules that have been reviewed at least once"
             )
 
     # ── Action buttons ─────────────────────────────────────────────────────────
@@ -626,6 +635,9 @@ def render_data_section():
     if no_rop_only and 'reorder_point' in df.columns:
         df = df[df['reorder_point'].isna() | (df['reorder_point'] == 0)]
 
+    if has_reviews_only and 'review_count' in df.columns:
+        df = df[df['review_count'] > 0]
+
     if df.empty:
         st.info("No records found. Adjust filters or add a new safety stock rule.")
         return
@@ -675,10 +687,56 @@ def render_data_section():
         lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else '—'
     ) if 'last_calculated_date' in df.columns else '—'
 
+    # ── Review badge columns ──────────────────────────────────────────────────
+    if 'review_count' in df.columns:
+        def _review_badge(row):
+            cnt = int(row.get('review_count', 0) or 0)
+            if cnt == 0:
+                return '—'
+            action = str(row.get('last_action', '') or '')
+            icon = {'INCREASED': '📈', 'DECREASED': '📉', 'NO_CHANGE': '➡️',
+                    'METHOD_CHANGED': '🔄'}.get(action, '✅')
+            return f"{icon} {cnt}"
+        display_df['Reviews'] = df.apply(_review_badge, axis=1)
+        display_df['Last Review'] = df['last_review_date'].apply(
+            lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else '—'
+        )
+    else:
+        display_df['Reviews']     = '—'
+        display_df['Last Review'] = '—'
+
+    # ── Row highlighting via pandas Styler ───────────────────────────────────
+    def _style_rows(row):
+        rev = row.get('Reviews', '—')
+        if rev == '—':
+            return [''] * len(row)
+        # Pick color by last action icon prefix
+        if '📈' in str(rev):
+            bg = 'background-color: #e8f5e9'   # light green — increased
+        elif '📉' in str(rev):
+            bg = 'background-color: #fff3e0'   # light amber — decreased
+        elif '🔄' in str(rev):
+            bg = 'background-color: #e3f2fd'   # light blue  — method changed
+        else:
+            bg = 'background-color: #f3e5f5'   # light purple — reviewed/no change
+        return [bg] * len(row)
+
+    styled_df = display_df.style.apply(_style_rows, axis=1)
+
     st.subheader(f"Safety Stock Rules ({len(df)} records)")
 
+    # Legend for row colors
+    st.caption(
+        "Row colors — "
+        "🟢 **Green**: SS increased &nbsp;|&nbsp; "
+        "🟠 **Amber**: SS decreased &nbsp;|&nbsp; "
+        "🔵 **Blue**: Method changed &nbsp;|&nbsp; "
+        "🟣 **Purple**: Reviewed / no change &nbsp;|&nbsp; "
+        "⬜ **White**: Never reviewed"
+    )
+
     selected = st.dataframe(
-        display_df,
+        styled_df,
         width="stretch",
         hide_index=True,
         selection_mode="single-row",
@@ -1559,6 +1617,13 @@ def bulk_upload_dialog():
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 
+@st.fragment
+def render_analysis_section():
+    """Proxy — delegates to utils.safety_stock.analysis (separated for maintainability)"""
+    from utils.safety_stock.analysis import render_analysis_section as _render
+    _render()
+
+
 def render_help_popover():
     """Proxy — delegates to utils.safety_stock.help (separated for maintainability)"""
     from utils.safety_stock.help import render_help_popover as _render
@@ -1582,6 +1647,9 @@ def main():
 
     # ── Data section (fragment – filter changes rerun only this block) ─────────
     render_data_section()
+
+    # ── Analysis section (independent fragment) ────────────────────────────────
+    render_analysis_section()
 
 
 if __name__ == "__main__":

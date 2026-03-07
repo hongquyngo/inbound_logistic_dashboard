@@ -133,14 +133,30 @@ def get_safety_stock_levels(
             s.created_by,
             s.created_date,
             s.updated_by,
-            s.updated_date
-            
+            s.updated_date,
+
+            -- Review summary
+            COALESCE(rv.review_count, 0)  AS review_count,
+            rv.last_review_date           AS last_review_date,
+            rv.last_action                AS last_action,
+            rv.last_change_pct            AS last_change_pct
+
         FROM safety_stock_levels s
         LEFT JOIN products p ON s.product_id = p.id
         LEFT JOIN brands b ON p.brand_id = b.id
         LEFT JOIN companies e ON s.entity_id = e.id
         LEFT JOIN companies c ON s.customer_id = c.id
         LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
+        LEFT JOIN (
+            SELECT
+                safety_stock_level_id,
+                COUNT(*)                                                         AS review_count,
+                MAX(review_date)                                                 AS last_review_date,
+                SUBSTRING_INDEX(GROUP_CONCAT(action_taken   ORDER BY review_date DESC), ',', 1) AS last_action,
+                SUBSTRING_INDEX(GROUP_CONCAT(change_percentage ORDER BY review_date DESC), ',', 1) AS last_change_pct
+            FROM safety_stock_reviews
+            GROUP BY safety_stock_level_id
+        ) rv ON rv.safety_stock_level_id = s.id
         WHERE {where_clause}
         ORDER BY s.priority_level, p.pt_code
         """)
@@ -656,4 +672,112 @@ def get_review_history(safety_stock_id: int) -> pd.DataFrame:
         
     except Exception as e:
         logger.error(f"Error fetching review history: {e}")
+        return pd.DataFrame()
+
+
+# ==================== Analytics Functions ====================
+
+def get_review_history_analytics(entity_id: int = None, days: int = 90) -> pd.DataFrame:
+    """
+    All reviews with product info for analytics — used by Analysis section.
+    """
+    try:
+        engine = get_db_engine()
+        conditions = ["ssr.delete_flag = 0", "DATE(ssr.review_date) >= DATE_SUB(CURDATE(), INTERVAL :days DAY)"]
+        params: dict = {'days': days}
+        if entity_id:
+            conditions.append("ss_lvl.entity_id = :entity_id")
+            params['entity_id'] = entity_id
+
+        query = text(f"""
+        SELECT
+            ssr.id,
+            ssr.safety_stock_level_id,
+            p.pt_code,
+            p.name          AS product_name,
+            b.brand_name,
+            e.company_code  AS entity_code,
+            ssr.review_date,
+            ssr.review_type,
+            ssr.old_safety_stock_qty,
+            ssr.new_safety_stock_qty,
+            ssr.change_percentage,
+            ssr.action_taken,
+            ssr.action_reason,
+            ssr.reviewed_by
+        FROM safety_stock_reviews ssr
+        JOIN safety_stock_levels ss_lvl ON ssr.safety_stock_level_id = ss_lvl.id AND ss_lvl.delete_flag = 0
+        JOIN products p ON ss_lvl.product_id = p.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+        LEFT JOIN companies e ON ss_lvl.entity_id = e.id
+        WHERE {' AND '.join(conditions)}
+        ORDER BY ssr.review_date DESC
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql(query, conn, params=params)
+    except Exception as e:
+        logger.error(f"get_review_history_analytics error: {e}")
+        return pd.DataFrame()
+
+
+def get_coverage_analysis(entity_id: int = None) -> pd.DataFrame:
+    """
+    Current inventory vs SS target vs ROP per product — for coverage analysis tab.
+    Joins safety_stock_levels + inventory_histories (latest snapshot per warehouse).
+    """
+    try:
+        engine = get_db_engine()
+        conditions = ["ss_lvl.delete_flag = 0", "ss_lvl.is_active = 1",
+                      "CURRENT_DATE() >= ss_lvl.effective_from",
+                      "(ss_lvl.effective_to IS NULL OR CURRENT_DATE() <= ss_lvl.effective_to)"]
+        params: dict = {}
+        if entity_id:
+            conditions.append("ss_lvl.entity_id = :entity_id")
+            params['entity_id'] = entity_id
+
+        query = text(f"""
+        SELECT
+            p.pt_code,
+            p.name                          AS product_name,
+            b.brand_name,
+            e.company_code                  AS entity_code,
+            ss_lvl.id                          AS level_id,
+            ss_lvl.safety_stock_qty,
+            ss_lvl.reorder_point,
+            ss_lvl.customer_id,
+            COALESCE(c.company_code, 'All') AS customer_code,
+            ssp.calculation_method,
+            ssp.last_calculated_date,
+            COALESCE(inv.on_hand, 0)        AS on_hand,
+            CASE
+                WHEN ss_lvl.safety_stock_qty > 0
+                THEN ROUND(COALESCE(inv.on_hand, 0) / ss_lvl.safety_stock_qty * 100, 1)
+                ELSE NULL
+            END                             AS coverage_pct,
+            CASE
+                WHEN ss_lvl.reorder_point IS NOT NULL AND ss_lvl.reorder_point > 0
+                    AND COALESCE(inv.on_hand, 0) <= ss_lvl.reorder_point THEN 'Below ROP'
+                WHEN COALESCE(inv.on_hand, 0) < ss_lvl.safety_stock_qty   THEN 'Below SS'
+                WHEN COALESCE(inv.on_hand, 0) >= ss_lvl.safety_stock_qty  THEN 'Above SS'
+                ELSE 'No Data'
+            END                             AS coverage_status
+        FROM safety_stock_levels ss_lvl
+        JOIN products p ON ss_lvl.product_id = p.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+        LEFT JOIN companies e ON ss_lvl.entity_id = e.id
+        LEFT JOIN companies c ON ss_lvl.customer_id = c.id
+        LEFT JOIN safety_stock_parameters ssp ON ssp.safety_stock_level_id = ss_lvl.id
+        LEFT JOIN (
+            SELECT product_id, SUM(remain) AS on_hand
+            FROM inventory_histories
+            WHERE delete_flag = 0
+            GROUP BY product_id
+        ) inv ON inv.product_id = ss_lvl.product_id
+        WHERE {' AND '.join(conditions)}
+        ORDER BY coverage_pct ASC
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql(query, conn, params=params)
+    except Exception as e:
+        logger.error(f"get_coverage_analysis error: {e}")
         return pd.DataFrame()
