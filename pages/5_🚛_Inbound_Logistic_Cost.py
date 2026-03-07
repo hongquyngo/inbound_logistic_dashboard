@@ -92,7 +92,7 @@ def main():
 def _header_fragment():
     state = st.session_state.cost_state
 
-    title_col, btn_col = st.columns([5, 1])
+    title_col, btn_col, help_col = st.columns([5, 1, 1])
     with title_col:
         st.title("🚛 Inbound Logistic Cost")
         st.caption(
@@ -101,16 +101,15 @@ def _header_fragment():
         )
     with btn_col:
         st.markdown("<br>", unsafe_allow_html=True)
-        add_col, help_col = st.columns([3, 1])
-        with add_col:
-            if _can_write():
-                if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
-                    create_cost_dialog()
-            else:
-                st.button("➕ Add Cost Entry", type="primary", width="stretch", disabled=True,
-                          help="🔒 Requires admin, inbound_manager, or supply_chain role.")
-        with help_col:
-            render_help_popover()
+        if _can_write():
+            if st.button("➕ Add Cost Entry", type="primary", width="stretch"):
+                create_cost_dialog()
+        else:
+            st.button("➕ Add Cost Entry", type="primary", width="stretch", disabled=True,
+                      help="🔒 Requires admin, inbound_manager, or supply_chain role.")
+    with help_col:
+        st.markdown("<br>", unsafe_allow_html=True)
+        render_help_popover()
 
     if state.last_created_cost:
         c = state.last_created_cost

@@ -226,9 +226,7 @@ def load_all_products_for_select():
 def format_product_display(row) -> str:
     pt_code = str(row['pt_code'])
     name    = str(row['name']) if pd.notna(row['name']) else ""
-    name    = name[:35] + "..." if len(name) > 35 else name
     pkg     = str(row['package_size']) if pd.notna(row['package_size']) else ""
-    pkg     = pkg[:20] + "..." if len(pkg) > 20 else pkg
     brand   = str(row['brand_name']) if pd.notna(row['brand_name']) else ""
 
     display = f"{pt_code} | {name}"
@@ -463,7 +461,7 @@ def render_data_section():
     # ── Filters Row 1 ─────────────────────────────────────────────────────────
     with st.container():
         st.subheader("Filters")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4 = st.columns([2, 2, 4, 1])
         existing = load_existing_filter_options()
 
         with col1:
