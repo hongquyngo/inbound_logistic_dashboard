@@ -27,7 +27,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
     """
     with st.expander("🔍 Filters", expanded=True):
         # Date Range
-        col1, col2 = st.columns([1, 3])
+        col1, col2, col3 = st.columns([1, 3, 1])
         
         with col1:
             date_type = st.radio(
@@ -60,6 +60,15 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
                 value=(min_date, max_date),
                 min_value=min_date,
                 max_value=max_date
+            )
+        
+        with col3:
+            st.markdown("")  # spacing to align with date input
+            past_date_only = st.checkbox(
+                f"📅 Past {date_type} Only",
+                value=False,
+                key="filter_past_date",
+                help=f"Show only records where {date_type} is before today"
             )
         
         # Organization & Vendor
@@ -200,6 +209,7 @@ def render_filters(filter_options: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'date_type': date_type,
         'date_range': date_range,
+        'past_date_only': past_date_only,
         'legal_entities': legal_entities,
         'excl_legal_entities': excl_legal_entities,
         'vendors': vendors,
@@ -249,6 +259,11 @@ def build_sql_params(filters: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         if len(date_range) >= 2:
             query_parts.append(f"{date_column} <= :date_to")
             params['date_to'] = date_range[1]
+    
+    # Past date filter - only show records where selected date < today
+    if filters.get('past_date_only', False):
+        query_parts.append(f"{date_column} < :past_date_cutoff")
+        params['past_date_cutoff'] = datetime.now().date()
     
     # Helper function to add filter with exclusion logic
     def add_filter(column: str, values: List, exclude: bool, param_name: str):
