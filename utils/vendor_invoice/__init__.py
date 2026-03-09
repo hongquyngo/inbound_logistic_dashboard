@@ -19,6 +19,11 @@ from .invoice_data import (
     get_invoice_summary_by_vendor,
     get_invoice_aging_report,
     validate_invoice_edit,
+    # PI (Proforma Invoice) functions
+    get_uninvoiced_po_lines,
+    get_po_filter_options,
+    get_pi_invoice_details,
+    validate_pi_selection,
 )
 from .invoice_service import InvoiceService
 from .currency_utils import (
@@ -44,13 +49,16 @@ from .s3_utils import S3Manager
 from .payment_terms_calculator import PaymentTermParser, calculate_days_from_term_name as calc_days
 
 __all__ = [
-    # invoice_data
+    # invoice_data — CI (CAN-based)
     "get_uninvoiced_ans", "get_filter_options", "get_invoice_details",
     "validate_invoice_selection", "create_purchase_invoice", "generate_invoice_number",
     "get_payment_terms", "calculate_days_from_term_name", "get_po_line_summary",
     "get_recent_invoices", "get_invoice_by_id", "update_invoice", "delete_invoice",
     "get_invoice_line_items", "get_invoice_summary_by_vendor", "get_invoice_aging_report",
     "validate_invoice_edit",
+    # invoice_data — PI (PO-based)
+    "get_uninvoiced_po_lines", "get_po_filter_options", "get_pi_invoice_details",
+    "validate_pi_selection",
     # invoice_service
     "InvoiceService",
     # currency_utils

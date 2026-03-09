@@ -175,6 +175,156 @@ def _get_legacy_invoice_qtys(ppo_ids_tuple: tuple) -> pd.DataFrame:
                                      "legacy_invoice_qty", "legacy_invoice_count"])
 
 
+# ============================================================================
+# PO-BASED DATA SOURCE FOR PROFORMA INVOICE
+# ============================================================================
+
+@st.cache_data(ttl=300)
+def get_uninvoiced_po_lines(filters: Dict = None) -> pd.DataFrame:
+    """
+    Get PO lines with uninvoiced quantity for Proforma Invoice creation.
+    Source: po_invoice_view (PO lines, not CAN lines).
+    """
+    try:
+        engine = get_db_engine()
+
+        query = """
+        SELECT
+            po_line_id,
+            purchase_order_id,
+            po_number,
+            external_ref_number,
+            po_type,
+            po_date,
+            creator,
+            created_date,
+            vendor_id,
+            vendor,
+            vendor_code,
+            vendor_location_type,
+            entity_id,
+            consignee,
+            consignee_code,
+            product_purchase_order_id,
+            product_id,
+            product_name,
+            pt_code,
+            brand,
+            standard_uom,
+            buying_uom,
+            uom_conversion,
+            purchase_unit_cost,
+            currency_code,
+            buying_unit_cost,
+            vat_gst          AS vat_percent,
+            effective_buying_quantity,
+            effective_standard_quantity,
+            cancelled_buying_quantity,
+            total_invoiced_quantity,
+            pi_invoiced_buying_qty,
+            ci_invoiced_buying_qty,
+            existing_invoice_numbers,
+            uninvoiced_quantity,
+            total_arrived_quantity,
+            arrival_status,
+            invoice_status,
+            po_line_status,
+            is_over_invoiced,
+            has_commercial_invoice,
+            invoice_completion_percent,
+            arrival_completion_percent,
+            payment_term_id,
+            payment_term
+        FROM po_invoice_view
+        WHERE uninvoiced_quantity > 0
+        """
+
+        conditions = []
+        params = {}
+
+        if filters:
+            if filters.get('vendors'):
+                conditions.append("vendor_code IN :vendors")
+                params['vendors'] = tuple(filters['vendors'])
+            if filters.get('entities'):
+                conditions.append("consignee_code IN :entities")
+                params['entities'] = tuple(filters['entities'])
+            if filters.get('brands'):
+                conditions.append("brand IN :brands")
+                params['brands'] = tuple(filters['brands'])
+            if filters.get('po_numbers'):
+                conditions.append("po_number IN :po_numbers")
+                params['po_numbers'] = tuple(filters['po_numbers'])
+            if filters.get('creators'):
+                conditions.append("creator IN :creators")
+                params['creators'] = tuple(filters['creators'])
+            if filters.get('po_date_from'):
+                conditions.append("po_date >= :po_date_from")
+                params['po_date_from'] = filters['po_date_from']
+            if filters.get('po_date_to'):
+                conditions.append("po_date <= :po_date_to")
+                params['po_date_to'] = filters['po_date_to']
+            if filters.get('arrival_status'):
+                conditions.append("arrival_status IN :arrival_status")
+                params['arrival_status'] = tuple(filters['arrival_status'])
+
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+
+        query += " ORDER BY po_date DESC, po_number DESC, po_line_id DESC"
+
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn, params=params)
+
+        if df.empty:
+            return df
+
+        # Derived columns
+        df["estimated_invoice_value"] = (
+            df["uninvoiced_quantity"] * df["purchase_unit_cost"]
+        ).round(2)
+        df["vat_amount"] = (
+            df["estimated_invoice_value"] * df["vat_percent"] / 100
+        ).round(2)
+
+        return df
+
+    except Exception as e:
+        logger.error(f"Error fetching uninvoiced PO lines: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_po_filter_options() -> Dict:
+    """Extract filter options from cached PO lines dataframe."""
+    try:
+        df = get_uninvoiced_po_lines()
+        if df.empty:
+            return _empty_po_filter_options()
+        return {
+            'creators':    sorted(df['creator'].dropna().unique().tolist()),
+            'vendors':     sorted(
+                df[['vendor_code', 'vendor']].drop_duplicates()
+                .apply(lambda r: (r['vendor_code'], r['vendor']), axis=1).tolist()
+            ),
+            'entities':    sorted(
+                df[['consignee_code', 'consignee']].drop_duplicates()
+                .apply(lambda r: (r['consignee_code'], r['consignee']), axis=1).tolist()
+            ),
+            'brands':      sorted(df['brand'].dropna().unique().tolist()),
+            'po_numbers':  sorted(df['po_number'].dropna().unique().tolist()),
+            'po_line_statuses': sorted(df['po_line_status'].dropna().unique().tolist()),
+        }
+    except Exception as e:
+        logger.error(f"Error getting PO filter options: {e}")
+        return _empty_po_filter_options()
+
+
+def _empty_po_filter_options() -> Dict:
+    return {k: [] for k in ['creators', 'vendors', 'entities',
+                             'brands', 'po_numbers', 'po_line_statuses']}
+
+
 @st.cache_data(ttl=300)
 def get_filter_options() -> Dict:
     """Extract filter options from cached AN dataframe — zero extra DB query."""
@@ -307,6 +457,134 @@ def get_invoice_details(can_line_ids: List[int]) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error getting invoice details: {e}")
         return pd.DataFrame()
+
+
+def get_pi_invoice_details(po_line_ids: List[int]) -> pd.DataFrame:
+    """
+    Get detailed information for selected PO lines (for PI creation).
+    Similar to get_invoice_details() but queries product_purchase_orders
+    directly instead of arrival_details.
+    
+    Key difference: NO arrival_detail_id in result → PI has NULL arrival_detail_id.
+    """
+    try:
+        engine = get_db_engine()
+
+        query = """
+        SELECT 
+            ppo.id AS po_line_id,
+            
+            -- Direct PO references (NO arrival_detail_id for PI)
+            ppo.id AS product_purchase_order_id,
+            ppo.purchase_order_id,
+            
+            -- PO Info
+            po.po_number,
+            po.currency_id AS po_currency_id,
+            c.code AS po_currency_code,
+            po.seller_company_id AS vendor_id,
+            po.buyer_company_id AS entity_id,
+            po.payment_term_id,
+            
+            -- Payment Terms
+            pt.name AS payment_term_name,
+            
+            -- Product Info
+            p.name AS product_name,
+            p.pt_code,
+            
+            -- Vendor Info
+            seller.english_name AS vendor,
+            seller.company_code AS vendor_code,
+            
+            -- Quantities
+            piv.uninvoiced_quantity,
+            piv.effective_buying_quantity,
+            piv.effective_standard_quantity,
+            ppo.purchaseuom AS buying_uom,
+            ppo.conversion AS uom_conversion,
+            p.uom AS standard_uom,
+            
+            -- Cost
+            CONCAT(
+                ROUND(ppo.purchase_unit_cost, 2), 
+                ' ', 
+                c.code
+            ) AS buying_unit_cost,
+            ppo.vat_gst AS vat_percent,
+
+            -- Payment term (for compatibility)
+            pt.name AS payment_term
+            
+        FROM product_purchase_orders ppo
+        
+        INNER JOIN purchase_orders po 
+            ON po.id = ppo.purchase_order_id
+            AND po.delete_flag = 0
+        
+        INNER JOIN products p 
+            ON p.id = ppo.product_id
+        
+        INNER JOIN companies seller 
+            ON seller.id = po.seller_company_id
+        
+        INNER JOIN currencies c 
+            ON c.id = po.currency_id
+        
+        LEFT JOIN payment_terms pt 
+            ON pt.id = po.payment_term_id
+        
+        -- Join po_invoice_view for uninvoiced_quantity calculation
+        LEFT JOIN po_invoice_view piv
+            ON piv.po_line_id = ppo.id
+        
+        WHERE ppo.id IN :po_line_ids
+            AND ppo.delete_flag = 0
+        
+        ORDER BY po.po_number, ppo.id
+        """
+
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn, params={'po_line_ids': tuple(po_line_ids)})
+
+        if not df.empty:
+            df['payment_term_days'] = df['payment_term_name'].apply(calculate_days_from_term_name)
+
+        return df
+
+    except Exception as e:
+        logger.error(f"Error getting PI invoice details: {e}")
+        return pd.DataFrame()
+
+
+def validate_pi_selection(selected_df: pd.DataFrame) -> Tuple[bool, str]:
+    """
+    Basic validation for selected PO lines (PI creation).
+    Similar to validate_invoice_selection() but for PO-based flow.
+    """
+    if selected_df.empty:
+        return False, "No items selected"
+
+    # Check single vendor
+    vendors = selected_df['vendor_code'].unique()
+    if len(vendors) > 1:
+        return False, f"Multiple vendors selected: {', '.join(vendors)}. Please select PO lines from a single vendor."
+
+    # Check vendor type consistency
+    vtype_col = 'vendor_type' if 'vendor_type' in selected_df.columns else 'vendor_location_type'
+    if vtype_col in selected_df.columns:
+        vendor_types = selected_df[vtype_col].unique()
+        if len(vendor_types) > 1:
+            return False, "Cannot mix Internal and External vendors in the same invoice"
+
+    # Check single legal entity
+    entity_col = 'legal_entity_code' if 'legal_entity_code' in selected_df.columns else 'consignee_code'
+    if entity_col in selected_df.columns:
+        entities = selected_df[entity_col].unique()
+        if len(entities) > 1:
+            return False, f"Multiple legal entities selected: {', '.join(entities)}. Please select PO lines from a single entity."
+
+    return True, ""
 
 def validate_invoice_selection(selected_df: pd.DataFrame) -> Tuple[bool, str]:
     """
@@ -446,7 +724,7 @@ def create_purchase_invoice(
                     'purchase_invoice_id': invoice_id,
                     'purchase_order_id': row['purchase_order_id'],
                     'product_purchase_order_id': row['product_purchase_order_id'],
-                    'arrival_detail_id': row['arrival_detail_id'],
+                    'arrival_detail_id': row.get('arrival_detail_id'),  # None for PI
                     'purchased_invoice_quantity': quantity,
                     'invoiced_quantity': quantity,
                     'amount': amount_include_vat,

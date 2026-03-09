@@ -43,6 +43,8 @@ def _can_modify() -> bool:
 @dataclass
 class InvoiceState:
     selected_ans: Set[int]            = field(default_factory=set)
+    selected_po_lines: Set[int]       = field(default_factory=set)   # PO line IDs for PI flow
+    invoice_source: str               = "can"                        # "can" or "po"
     wizard_step: str                  = "select"
     invoice_data: Optional[Dict]      = None
     details_df: Optional[pd.DataFrame] = None

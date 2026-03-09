@@ -318,3 +318,154 @@ class InvoiceService:
                 3: {'name': 'Net 90', 'days': 90, 'description': 'Payment due in 90 days'},
                 4: {'name': 'COD', 'days': 0, 'description': 'Cash on delivery'}
             }
+
+    @staticmethod
+    def validate_pi_with_po_level(df: pd.DataFrame) -> Tuple[Dict, Dict]:
+        """
+        Validation for PO-based Proforma Invoice (PI).
+        Simpler than CAN-based CI validation — no arrival checks needed.
+        
+        Returns:
+            (validation_results, messages)
+        """
+        validation_results = {
+            'can_invoice': True,
+            'has_warnings': False,
+            'has_risks': False
+        }
+
+        messages = {
+            'error': None,
+            'warnings': [],
+            'risks': []
+        }
+
+        # Basic validation
+        if df.empty:
+            validation_results['can_invoice'] = False
+            messages['error'] = "No items selected"
+            return validation_results, messages
+
+        # Check single vendor
+        vendors = df['vendor_code'].unique()
+        if len(vendors) > 1:
+            validation_results['can_invoice'] = False
+            messages['error'] = f"Multiple vendors selected: {', '.join(vendors)}"
+            return validation_results, messages
+
+        # Check single entity
+        entity_col = 'consignee_code'
+        entities = df[entity_col].unique()
+        if len(entities) > 1:
+            validation_results['can_invoice'] = False
+            messages['error'] = f"Multiple legal entities selected: {', '.join(entities)}"
+            return validation_results, messages
+
+        # Check vendor type consistency
+        vtype_col = 'vendor_location_type'
+        if vtype_col in df.columns:
+            vendor_types = df[vtype_col].unique()
+            if len(vendor_types) > 1:
+                validation_results['can_invoice'] = False
+                messages['error'] = "Cannot mix Internal and External vendors"
+                return validation_results, messages
+
+        # Warning: PO lines with existing commercial invoices
+        if 'has_commercial_invoice' in df.columns:
+            has_ci = df[df['has_commercial_invoice'] == 'Y']
+            if not has_ci.empty:
+                validation_results['has_warnings'] = True
+                messages['warnings'].append(
+                    f"⚠️ {len(has_ci)} PO line(s) already have Commercial Invoices. "
+                    f"Creating PI may result in double invoicing."
+                )
+
+        # Warning: over-invoiced PO lines
+        if 'is_over_invoiced' in df.columns:
+            over_inv = df[df['is_over_invoiced'] == 'Y']
+            if not over_inv.empty:
+                validation_results['has_warnings'] = True
+                messages['warnings'].append(
+                    f"{len(over_inv)} PO line(s) are already over-invoiced"
+                )
+
+        # Warning: multiple payment terms
+        payment_terms = df['payment_term'].dropna().unique()
+        if len(payment_terms) > 1:
+            validation_results['has_warnings'] = True
+            messages['warnings'].append(
+                f"Multiple payment terms: {', '.join(payment_terms)}. Most common will be used."
+            )
+
+        # Warning: multiple VAT rates
+        if 'vat_percent' in df.columns:
+            vat_rates = df['vat_percent'].unique()
+            if len(vat_rates) > 1:
+                validation_results['has_warnings'] = True
+                messages['warnings'].append(
+                    f"Multiple VAT rates: {', '.join([f'{v:.0f}%' for v in vat_rates])}"
+                )
+
+        # Info: arrival status
+        if 'arrival_status' in df.columns:
+            arrived = df[df['arrival_status'] != 'not_arrived']
+            if not arrived.empty:
+                validation_results['has_warnings'] = True
+                messages['warnings'].append(
+                    f"{len(arrived)} PO line(s) already have arrivals. "
+                    f"Consider using Commercial Invoice flow instead."
+                )
+
+        return validation_results, messages
+
+    @staticmethod
+    def prepare_pi_summary(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Prepare summary for PI preview with ID column.
+        Similar to prepare_invoice_summary but uses PO-level data.
+        """
+        # Group by PO, product, and VAT rate
+        summary = df.groupby(
+            ['po_number', 'pt_code', 'product_name', 'buying_unit_cost', 'vat_percent']
+        ).agg({
+            'uninvoiced_quantity': 'sum',
+        }).reset_index()
+
+        # Add row ID
+        summary.insert(0, 'id', range(1, len(summary) + 1))
+
+        qty_col = 'uninvoiced_quantity'
+
+        # Calculate amounts
+        summary['line_amount'] = summary.apply(
+            lambda row: float(str(row['buying_unit_cost']).split()[0]) * row[qty_col],
+            axis=1
+        )
+        summary['vat_amount'] = summary['line_amount'] * summary['vat_percent'] / 100
+        summary['total_amount'] = summary['line_amount'] + summary['vat_amount']
+        summary['vat_display'] = summary['vat_percent'].apply(lambda x: f"{x:.0f}%")
+
+        # Format monetary values
+        summary['line_amount'] = summary['line_amount'].apply(lambda x: f"{x:,.2f}")
+        summary['vat_amount'] = summary['vat_amount'].apply(lambda x: f"{x:,.2f}")
+        summary['total_amount'] = summary['total_amount'].apply(lambda x: f"{x:,.2f}")
+        summary[qty_col] = summary[qty_col].apply(lambda x: f"{x:,.2f}")
+
+        # Rename columns
+        summary.rename(columns={
+            'id': 'ID',
+            'po_number': 'PO Number',
+            'pt_code': 'PT Code',
+            'product_name': 'Product',
+            'buying_unit_cost': 'Unit Cost',
+            qty_col: 'Quantity',
+            'line_amount': 'Subtotal',
+            'vat_display': 'VAT',
+            'vat_amount': 'VAT Amount',
+            'total_amount': 'Total'
+        }, inplace=True)
+
+        display_cols = ['ID', 'PO Number', 'PT Code', 'Product', 'Unit Cost',
+                        'Quantity', 'Subtotal', 'VAT', 'VAT Amount', 'Total']
+
+        return summary[display_cols]

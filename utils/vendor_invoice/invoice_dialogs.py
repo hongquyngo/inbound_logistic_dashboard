@@ -18,6 +18,9 @@ from utils.vendor_invoice import (
     validate_uploaded_files, prepare_files_for_upload,
     summarize_files, save_media_records, cleanup_failed_uploads,
     S3Manager, InvoiceService, PaymentTermParser,
+    # PI (Proforma Invoice) functions
+    get_uninvoiced_po_lines, get_po_filter_options,
+    get_pi_invoice_details, validate_pi_selection,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,20 @@ def _cached_filter_options() -> dict:
     return get_filter_options()
 
 
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_uninvoiced_po_lines(filters_json: str) -> pd.DataFrame:
+    """Cache uninvoiced PO lines 2 min for PI flow."""
+    import json
+    filters = json.loads(filters_json) if filters_json and filters_json != "{}" else {}
+    return get_uninvoiced_po_lines(filters)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_po_filter_options() -> dict:
+    """Cache PO filter dropdown options 5 min."""
+    return get_po_filter_options()
+
+
 # ============================================================================
 # STATE  (imported from main page via session_state)
 # ============================================================================
@@ -80,7 +97,7 @@ def _invalidate_cache():
 
 
 # ============================================================================
-# CREATE INVOICE DIALOG — 3-step wizard
+# CREATE INVOICE DIALOG — 3-step wizard with dual source
 # ============================================================================
 
 @st.dialog("📄 Create Purchase Invoice", width="large")
@@ -90,19 +107,47 @@ def create_invoice_dialog():
     state = _state()
     service = InvoiceService()
 
-    # ── Persistent header: progress + Cancel always visible at top ────────────
-    prog_col, cancel_col = st.columns([5, 1])
-    with prog_col:
-        _show_progress(state.wizard_step)
-    with cancel_col:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("✖ Cancel", use_container_width=True, key="dlg_cancel_top"):
-            _reset_wizard()
-            st.rerun()
-    st.markdown("---")
-
+    # ── Source selector (only shown on step 1) ────────────────────────────────
     if state.wizard_step == "select":
-        _step1_select(state, service)
+        src_col, cancel_col = st.columns([5, 1])
+        with src_col:
+            source = st.radio(
+                "Invoice Source",
+                ["📦 From CAN (goods received)", "💰 From PO (advance payment)"],
+                horizontal=True,
+                key="dlg_source_radio",
+                index=0 if state.invoice_source == "can" else 1,
+            )
+            new_source = "po" if "PO" in source else "can"
+            if new_source != state.invoice_source:
+                state.invoice_source = new_source
+                state.selected_ans = set()
+                state.selected_po_lines = set()
+                st.rerun()
+        with cancel_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✖ Cancel", use_container_width=True, key="dlg_cancel_top"):
+                _reset_wizard()
+                st.rerun()
+        st.markdown("---")
+    else:
+        # Show progress + cancel for steps 2 and 3
+        prog_col, cancel_col = st.columns([5, 1])
+        with prog_col:
+            _show_progress(state.wizard_step, state.invoice_source)
+        with cancel_col:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("✖ Cancel", use_container_width=True, key="dlg_cancel_top"):
+                _reset_wizard()
+                st.rerun()
+        st.markdown("---")
+
+    # ── Route to appropriate step ─────────────────────────────────────────────
+    if state.wizard_step == "select":
+        if state.invoice_source == "po":
+            _step1_select_po(state, service)
+        else:
+            _step1_select(state, service)
     elif state.wizard_step == "preview":
         _step2_preview(state, service)
     elif state.wizard_step == "confirm":
@@ -111,13 +156,14 @@ def create_invoice_dialog():
 
 # ─── Progress bar ─────────────────────────────────────────────────────────────
 
-def _show_progress(step: str):
+def _show_progress(step: str, source: str = "can"):
     cur = {"select": 1, "preview": 2, "confirm": 3}.get(step, 1)
+    step1_label = "Select ANs" if source == "can" else "Select POs"
     c1, c2, c3 = st.columns(3)
     if cur >= 1:
-        c1.success("✅ Step 1: Select ANs")
+        c1.success(f"✅ Step 1: {step1_label}")
     else:
-        c1.info("⭕ Step 1: Select ANs")
+        c1.info(f"⭕ Step 1: {step1_label}")
     if cur >= 2:
         c2.success("✅ Step 2: Review")
     else:
@@ -372,6 +418,187 @@ def _date_filter(col, label, key, state, widget_key):
         else: state.filters.pop(key, None)
 
 
+# ─── Step 1 (PO flow) : Select PO Lines ───────────────────────────────────────
+
+def _step1_select_po(state, service):
+    """Step 1 for PO-based Proforma Invoice creation."""
+    _po_filters_expander(state)
+
+    import json
+    def _serialisable(v):
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        if isinstance(v, (list, tuple)):
+            return [_serialisable(i) for i in v]
+        return v
+    safe_filters = {k: _serialisable(v) for k, v in (state.filters or {}).items()}
+    filters_key = json.dumps(safe_filters, sort_keys=True)
+
+    with st.spinner("Loading PO lines..."):
+        df = _cached_uninvoiced_po_lines(filters_key)
+
+    total = len(df)
+    st.markdown(f"**📊 Available PO Lines ({total})**  —  "
+                f"**{len(state.selected_po_lines)} selected**")
+
+    if df.empty:
+        st.info("No uninvoiced PO lines found.")
+        st.markdown("---")
+        if st.button("✖ Cancel", use_container_width=True, key="s1po_cancel_empty"):
+            _reset_wizard()
+            st.rerun()
+    else:
+        st.session_state["_dlg_po_df"] = df
+        st.session_state["_dlg_po_service"] = service
+        _po_table_fragment()
+
+
+@st.fragment
+def _po_table_fragment():
+    """Isolated fragment for PO line selection table."""
+    df      = st.session_state.get("_dlg_po_df", pd.DataFrame())
+    service = st.session_state.get("_dlg_po_service")
+    state   = _state()
+
+    if df.empty:
+        return
+
+    disp     = _build_po_display_df(df)
+    page_ids = df["po_line_id"].tolist()
+
+    tbl_key = f"dlg_po_table_{st.session_state.get('_po_tbl_key', 0)}"
+
+    event = st.dataframe(
+        disp,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="multi-row",
+        on_select="rerun",
+        key=tbl_key,
+    )
+
+    # Sync selection → state.selected_po_lines
+    sel_indices = event.selection.rows
+    state.selected_po_lines -= set(page_ids)
+    for i in sel_indices:
+        state.selected_po_lines.add(page_ids[i])
+
+    st.markdown("---")
+
+    # Deselect button
+    if state.selected_po_lines:
+        _, desel_col = st.columns([5, 1])
+        with desel_col:
+            if st.button("✖ Deselect All", use_container_width=True, key="dlg_po_deselect"):
+                state.selected_po_lines.clear()
+                st.session_state["_po_tbl_key"] = st.session_state.get("_po_tbl_key", 0) + 1
+                st.rerun(scope="fragment")
+
+    # Metrics + validation
+    can_proceed = False
+    if state.selected_po_lines and service:
+        selected_df = df[df["po_line_id"].isin(state.selected_po_lines)].copy()
+        selected_df = selected_df.drop_duplicates(subset=["po_line_id"])
+
+        if not selected_df.empty:
+            totals = service.calculate_invoice_totals_with_vat(selected_df)
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("PO Lines", len(selected_df))
+            mc2.metric("POs", selected_df['po_number'].nunique())
+            mc3.metric("Total Qty", f"{totals['total_quantity']:,.2f}")
+            mc4.metric("Est. Value", f"{totals['subtotal']:,.2f} {totals['currency']}")
+
+            is_valid, err = validate_pi_selection(selected_df)
+            if not is_valid:
+                st.error(f"❌ {err}")
+            else:
+                val_result, val_msgs = service.validate_pi_with_po_level(selected_df)
+                if not val_result["can_invoice"]:
+                    st.error(f"❌ {val_msgs['error']}")
+                else:
+                    for w in val_msgs.get("warnings", []):
+                        st.warning(f"⚠️ {w}")
+                    can_proceed = True
+
+    # Nav buttons
+    st.markdown("---")
+    nb1, _, nb3 = st.columns([1, 2, 1])
+    with nb1:
+        if st.button("✖ Cancel", use_container_width=True,
+                     key=f"s1po_cancel_{can_proceed}"):
+            _reset_wizard()
+            st.rerun(scope="app")
+    with nb3:
+        if st.button("➡️ Review Invoice", type="primary", use_container_width=True,
+                     key=f"s1po_next_{can_proceed}",
+                     disabled=not can_proceed):
+            selected_df = df[df["po_line_id"].isin(state.selected_po_lines)].copy()
+            selected_df = selected_df.drop_duplicates(subset=["po_line_id"])
+            state.selected_df = selected_df
+            state.is_advance_payment = True  # PI is always advance
+            state.wizard_step = "preview"
+            st.rerun(scope="app")
+
+
+def _build_po_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Build display-only DataFrame for the PO line table."""
+    disp = pd.DataFrame()
+    disp["PO#"]     = df["po_number"].str[:15]
+    disp["Vendor"]  = df.apply(lambda r: f"{r['vendor_code'][:4]}-{r['vendor'][:14]}", axis=1)
+    disp["Product"] = df.apply(lambda r: f"{r['pt_code'][:6]}-{r['product_name'][:14]}", axis=1)
+    disp["Eff Qty"]   = df["effective_buying_quantity"].apply(lambda x: f"{x:,.0f}")
+    disp["Invoiced"]  = df["total_invoiced_quantity"].apply(lambda x: f"{x:,.0f}")
+    disp["Uninv Qty"] = df["uninvoiced_quantity"].apply(lambda x: f"{x:,.0f}")
+    disp["Unit Cost"]  = df["buying_unit_cost"].apply(
+        lambda x: f"{float(str(x).split()[0]):,.2f}" if " " in str(x) else f"{float(x):,.2f}")
+    disp["VAT"]        = df.get("vat_percent", pd.Series([0]*len(df), index=df.index)).apply(
+        lambda x: f"{x:.0f}%")
+    disp["Est.Val"]    = df["estimated_invoice_value"].apply(lambda x: f"{x:,.0f}")
+    disp["Arrival"]    = df.get("arrival_status", pd.Series(["N/A"]*len(df), index=df.index)).apply(
+        lambda x: {"not_arrived": "⬜", "partially_arrived": "🟡", "fully_arrived": "🟢"}.get(x, "❓"))
+
+    def _status(row):
+        flags = []
+        if row.get("is_over_invoiced") == "Y": flags.append("🔴OI")
+        if row.get("has_commercial_invoice") == "Y": flags.append("⚠️CI")
+        return " ".join(flags) if flags else "✅OK"
+    disp["Status"] = df.apply(_status, axis=1)
+
+    return disp
+
+
+def _po_filters_expander(state):
+    """Filters for PO-based selection."""
+    with st.expander("🔍 Filters", expanded=False):
+        filter_options = _cached_po_filter_options()
+        c1, c2 = st.columns(2)
+        with c1:
+            vendor_opts = [f"{code} - {name}" for code, name in filter_options.get("vendors", [])]
+            sel = st.multiselect("Vendor", vendor_opts, key="dlg_pof_vendor")
+            if sel: state.filters["vendors"] = [v.split(" - ")[0] for v in sel]
+            else: state.filters.pop("vendors", None)
+        with c2:
+            entity_opts = [f"{code} - {name}" for code, name in filter_options.get("entities", [])]
+            sel = st.multiselect("Legal Entity", entity_opts, key="dlg_pof_entity")
+            if sel: state.filters["entities"] = [e.split(" - ")[0] for e in sel]
+            else: state.filters.pop("entities", None)
+
+        c3, c4, c5 = st.columns(3)
+        _ms_filter(c3, "PO Number", filter_options.get("po_numbers", []), "po_numbers", state, "dlg_pof_po")
+        _ms_filter(c4, "Brand",     filter_options.get("brands", []),     "brands",     state, "dlg_pof_brand")
+        _ms_filter(c5, "Creator",   filter_options.get("creators", []),   "creators",   state, "dlg_pof_creator")
+
+        d1, d2, _, _, d5 = st.columns([1, 1, 1, 1, 0.5])
+        _date_filter(d1, "PO Date From", "po_date_from", state, "dlg_pof_from")
+        _date_filter(d2, "PO Date To",   "po_date_to",   state, "dlg_pof_to")
+        with d5:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("🔄 Reset", use_container_width=True, key="dlg_pof_reset"):
+                state.filters = {}
+                _cached_uninvoiced_po_lines.clear()
+                st.rerun()
+
+
 # ─── Step 2 : Review ──────────────────────────────────────────────────────────
 
 def _step2_preview(state, service):
@@ -381,8 +608,14 @@ def _step2_preview(state, service):
             state.wizard_step = "select"; st.rerun()
         return
 
+    is_po_source = state.invoice_source == "po"
+
+    # ── Load details based on source ──────────────────────────────────────────
     with st.spinner("Loading invoice details..."):
-        details_df = get_invoice_details(list(state.selected_ans))
+        if is_po_source:
+            details_df = get_pi_invoice_details(list(state.selected_po_lines))
+        else:
+            details_df = get_invoice_details(list(state.selected_ans))
 
     if details_df.empty:
         st.error("Could not load invoice details.")
@@ -390,19 +623,28 @@ def _step2_preview(state, service):
             state.wizard_step = "select"; st.rerun()
         return
 
-    details_df = details_df.drop_duplicates(subset=["arrival_detail_id"])
+    # Deduplicate based on source
+    if is_po_source:
+        details_df = details_df.drop_duplicates(subset=["po_line_id"])
+    else:
+        details_df = details_df.drop_duplicates(subset=["arrival_detail_id"])
     state.details_df = details_df
     po_currency_code = details_df["po_currency_code"].iloc[0]
 
     # Invoice type toggle
     c1, c2 = st.columns(2)
     with c1:
-        adv = st.checkbox("Advance Payment Invoice", value=state.is_advance_payment, key="dlg_adv")
-        if adv != state.is_advance_payment:
-            state.is_advance_payment = adv; st.rerun()
+        if is_po_source:
+            st.checkbox("Advance Payment Invoice", value=True, disabled=True, key="dlg_adv")
+            state.is_advance_payment = True
+        else:
+            adv = st.checkbox("Advance Payment Invoice", value=state.is_advance_payment, key="dlg_adv")
+            if adv != state.is_advance_payment:
+                state.is_advance_payment = adv; st.rerun()
     with c2:
         if state.is_advance_payment:
-            st.info("🔵 **Advance Payment (PI)**")
+            st.info("🔵 **Advance Payment (PI)** — from PO lines" if is_po_source
+                    else "🔵 **Advance Payment (PI)**")
         else:
             st.success("🟢 **Commercial Invoice (CI)**")
 
@@ -475,7 +717,10 @@ def _step2_preview(state, service):
             totals = service.calculate_invoice_totals_with_vat(state.selected_df)
             totals["currency"] = state.invoice_currency_code
 
-        summary_df = service.prepare_invoice_summary(state.selected_df)
+        if is_po_source:
+            summary_df = service.prepare_pi_summary(state.selected_df)
+        else:
+            summary_df = service.prepare_invoice_summary(state.selected_df)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
         _, _, tc = st.columns([2, 1, 1])
@@ -624,8 +869,15 @@ def _step3_confirm(state, service):
         st.text(f"Email:    {'Yes' if inv['email_to_accountant'] else 'No'}")
 
     st.markdown("**📋 Line Items**")
-    df_disp = details_df[["arrival_note_number", "po_number", "product_name",
-                           "uninvoiced_quantity", "buying_unit_cost"]].copy()
+    is_po_source = state.invoice_source == "po"
+    if is_po_source:
+        disp_cols = ["po_number", "product_name", "uninvoiced_quantity", "buying_unit_cost"]
+    else:
+        disp_cols = ["arrival_note_number", "po_number", "product_name",
+                     "uninvoiced_quantity", "buying_unit_cost"]
+    # Only use columns that exist in details_df
+    disp_cols = [c for c in disp_cols if c in details_df.columns]
+    df_disp = details_df[disp_cols].copy()
     df_disp.insert(0, "#", range(1, len(df_disp) + 1))
     st.dataframe(df_disp, use_container_width=True, hide_index=True)
 
@@ -741,7 +993,9 @@ def _do_create_invoice(invoice_data, details_df, auth, state):
 def _reset_wizard():
     state = _state()
     state.wizard_step = "select"
+    state.invoice_source = "can"
     state.selected_ans = set()
+    state.selected_po_lines = set()
     state.invoice_data = None
     state.details_df = None
     state.selected_df = None
@@ -763,12 +1017,16 @@ def _reset_wizard():
     state.s3_upload_success = False
     state.s3_keys = []
     state.media_ids = []
+    state.filters = {}
     # Clean up fragment-level nav state
     st.session_state.pop("_an_can_proceed", None)
     st.session_state.pop("_an_selected_df", None)
     st.session_state.pop("_an_tbl_key", None)
     st.session_state.pop("_an_can_proceed", None)
     st.session_state.pop("_an_selected_df", None)
+    st.session_state.pop("_po_tbl_key", None)
+    st.session_state.pop("_dlg_po_df", None)
+    st.session_state.pop("_dlg_po_service", None)
     st.session_state.show_create_dialog = False
 
 
