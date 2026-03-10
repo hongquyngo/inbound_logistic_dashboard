@@ -48,6 +48,9 @@ from utils.allocation.tooltip_helpers import (
     get_allocation_status_color
 )
 
+# Import help section
+from utils.allocation.help_section import show_help_button
+
 # Setup logging
 logger = logging.getLogger(__name__)
 
@@ -219,11 +222,13 @@ ALLOCATION_STATUS_OPTIONS = {
 # ==================== HEADER ====================
 def show_header():
     """Display page header with current user info"""
-    col1, col2 = st.columns([6, 1])
+    col1, col2, col3 = st.columns([6, 1, 1])
     with col1:
         st.title("📦 Allocation Planning System")
         st.caption("Product-centric view with complete allocation management")
     with col2:
+        show_help_button()
+    with col3:
         if st.button("🚪 Logout", use_container_width=True):
             reset_all_modals()
             auth.logout()
