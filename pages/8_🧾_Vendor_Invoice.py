@@ -20,6 +20,7 @@ from utils.vendor_invoice.invoice_dialogs import (
     edit_invoice_dialog,
     void_invoice_dialog,
 )
+from utils.vendor_invoice.invoice_help import render_help_popover
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +121,12 @@ def main():
 def _header_fragment():
     state = st.session_state.invoice_state
 
-    col_title, col_btn = st.columns([4, 1])
+    col_title, col_help, col_btn = st.columns([4, 0.3, 1])
     with col_title:
         st.title("📊 Vendor Invoice Management")
+    with col_help:
+        st.markdown("<br>", unsafe_allow_html=True)
+        render_help_popover()
     with col_btn:
         st.markdown("<br>", unsafe_allow_html=True)
         if _can_modify():

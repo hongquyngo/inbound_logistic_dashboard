@@ -47,6 +47,7 @@ from .invoice_attachments import (
 )
 from .s3_utils import S3Manager
 from .payment_terms_calculator import PaymentTermParser, calculate_days_from_term_name as calc_days
+from .invoice_help import render_help_popover
 
 __all__ = [
     # invoice_data — CI (CAN-based)
@@ -72,4 +73,6 @@ __all__ = [
     "S3Manager",
     # payment_terms_calculator
     "PaymentTermParser",
+    # invoice_help
+    "render_help_popover",
 ]
