@@ -23,7 +23,7 @@ class InvoiceService:
             'total_quantity': df['uninvoiced_quantity'].sum(),
             'total_lines': len(df),
             'po_count': df['po_number'].nunique(),
-            'an_count': df['arrival_note_number'].nunique()
+            'an_count': df['arrival_note_number'].nunique() if 'arrival_note_number' in df.columns else 0
         }
         
         # Calculate total value
@@ -53,7 +53,7 @@ class InvoiceService:
             'total_quantity': df['uninvoiced_quantity'].sum(),
             'total_lines': len(df),
             'po_count': df['po_number'].nunique(),
-            'an_count': df['arrival_note_number'].nunique()
+            'an_count': df['arrival_note_number'].nunique() if 'arrival_note_number' in df.columns else 0
         }
         
         # Calculate subtotal and VAT
