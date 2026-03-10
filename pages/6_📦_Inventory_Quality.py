@@ -103,7 +103,7 @@ def render_header():
         st.caption("Track Good, Quarantine, and Defective inventory")
     
     with col2:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh", width='stretch'):
             st.cache_data.clear()
             st.session_state['iq_selected_idx'] = None
             st.rerun()
@@ -193,15 +193,15 @@ def render_summary_cards(df: pd.DataFrame):
         )
     
     # Compute expiry metrics from filtered GOOD df
-    today = get_vietnam_today()
+    today = pd.Timestamp(get_vietnam_today())
     near_expiry_cutoff = today + timedelta(days=near_expiry_days)
     
     if not good_df.empty and 'expiry_date' in good_df.columns:
         expiry_dates = pd.to_datetime(good_df['expiry_date'], errors='coerce')
         has_expiry = expiry_dates.notna()
         
-        expired_mask = has_expiry & (expiry_dates.dt.date < today)
-        near_mask = has_expiry & (expiry_dates.dt.date >= today) & (expiry_dates.dt.date <= near_expiry_cutoff)
+        expired_mask = has_expiry & (expiry_dates < today)
+        near_mask = has_expiry & (expiry_dates >= today) & (expiry_dates <= near_expiry_cutoff)
         
         expired_count = expired_mask.sum()
         expired_value = good_df.loc[expired_mask, 'inventory_value_usd'].fillna(0).sum()
@@ -327,7 +327,7 @@ def render_filters():
     with col5:
         st.write("")  # Spacer
         st.write("")
-        if st.button("🔄 Clear Filters", use_container_width=True):
+        if st.button("🔄 Clear Filters", width='stretch'):
             st.session_state['iq_category_filter'] = 'All'
             st.session_state['iq_warehouse_select'] = {'id': None, 'name': 'All Warehouses'}
             st.session_state['iq_entity_filter'] = []
@@ -517,18 +517,18 @@ def render_data_table(df: pd.DataFrame):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            if st.button("🔍 View Details", type="primary", use_container_width=True, key="btn_view_detail"):
+            if st.button("🔍 View Details", type="primary", width='stretch', key="btn_view_detail"):
                 st.session_state['iq_detail_data'] = selected_item.to_dict()
                 st.session_state['iq_show_detail'] = True
                 st.rerun()
         
         with col2:
             # Placeholder for future actions
-            st.button("📋 Actions", use_container_width=True, disabled=True, 
+            st.button("📋 Actions", width='stretch', disabled=True, 
                      help="Coming soon: QC Approve, Repair, Scrap", key="btn_actions")
         
         with col3:
-            if st.button("❌ Deselect", use_container_width=True, key="btn_deselect"):
+            if st.button("❌ Deselect", width='stretch', key="btn_deselect"):
                 st.session_state['iq_selected_idx'] = None
                 st.rerun()
     else:
@@ -593,7 +593,7 @@ def show_detail_dialog(item: dict):
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="btn_close_dialog"):
+        if st.button("✖️ Close", width='stretch', key="btn_close_dialog"):
             st.session_state['iq_show_detail'] = False
             st.session_state['iq_detail_data'] = None
             st.rerun()
@@ -670,7 +670,7 @@ def render_export_section(df: pd.DataFrame, category: str, warehouse_id: int, en
     col1, col2 = st.columns([1, 4])
     
     with col1:
-        if st.button("📥 Export to Excel", use_container_width=True, key="btn_export"):
+        if st.button("📥 Export to Excel", width='stretch', key="btn_export"):
             try:
                 export_df = data_loader.get_export_data(
                     category=category if category != 'All' else None,
@@ -966,7 +966,7 @@ def render_period_table(df: pd.DataFrame, from_utc=None, to_utc=None,
         col1, col2, col3 = st.columns([1, 1, 3])
         
         with col1:
-            if st.button("🔍 View Details", type="primary", use_container_width=True, 
+            if st.button("🔍 View Details", type="primary", width='stretch', 
                          key="btn_period_detail"):
                 st.session_state['iq_period_detail_data'] = {
                     'product_id': int(selected_row['product_id']),
@@ -992,7 +992,7 @@ def render_period_table(df: pd.DataFrame, from_utc=None, to_utc=None,
                 st.rerun()
         
         with col2:
-            if st.button("❌ Deselect", use_container_width=True, key="btn_period_deselect"):
+            if st.button("❌ Deselect", width='stretch', key="btn_period_deselect"):
                 st.session_state['iq_period_selected_idx'] = None
                 st.rerun()
     else:
@@ -1420,7 +1420,7 @@ def show_period_detail_dialog(detail_data: dict):
     st.markdown("---")
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        if st.button("✖️ Close", use_container_width=True, key="btn_close_period_detail"):
+        if st.button("✖️ Close", width='stretch', key="btn_close_period_detail"):
             st.session_state['iq_period_show_detail'] = False
             st.session_state['iq_period_detail_data'] = None
             st.rerun()
@@ -1463,7 +1463,7 @@ def render_period_export(df: pd.DataFrame, from_date, to_date):
                 data=excel_data,
                 file_name=filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                width='stretch',
                 key="download_period_excel"
             )
         except Exception as e:
@@ -1631,15 +1631,15 @@ def render_analytics():
     )
     
     # Assign expiry bucket
-    today = get_vietnam_today()
+    today = pd.Timestamp(get_vietnam_today())
     expiry_dates = pd.to_datetime(df.get('expiry_date'), errors='coerce')
     conditions = [
         expiry_dates.isna(),
-        expiry_dates.dt.date < today,
-        expiry_dates.dt.date <= today + timedelta(days=30),
-        expiry_dates.dt.date <= today + timedelta(days=90),
-        expiry_dates.dt.date <= today + timedelta(days=180),
-        expiry_dates.dt.date > today + timedelta(days=180),
+        expiry_dates < today,
+        expiry_dates <= today + timedelta(days=30),
+        expiry_dates <= today + timedelta(days=90),
+        expiry_dates <= today + timedelta(days=180),
+        expiry_dates > today + timedelta(days=180),
     ]
     choices = ['No Expiry', 'Expired', 'Expiring Soon (≤30d)', 'Expiring (31-90d)', 'Good (91-180d)', 'Fresh (>180d)']
     df['expiry_bucket'] = np.select(conditions, choices, default='No Expiry')
@@ -1696,7 +1696,7 @@ def render_analytics():
             xaxis_title='Value (USD)', yaxis_title='',
             showlegend=False,
         )
-        st.plotly_chart(fig_cat, use_container_width=True)
+        st.plotly_chart(fig_cat, width='stretch')
     
     with r1c2:
         st.markdown("##### 📅 Expiry Status Breakdown")
@@ -1721,7 +1721,7 @@ def render_analytics():
         )
         fig_exp = _plotly_layout_defaults(fig_exp, height=350)
         fig_exp.update_layout(showlegend=False)
-        st.plotly_chart(fig_exp, use_container_width=True)
+        st.plotly_chart(fig_exp, width='stretch')
     
     st.markdown("---")
     
@@ -1765,7 +1765,7 @@ def render_analytics():
             yaxis=dict(autorange='reversed'),
             showlegend=False,
         )
-        st.plotly_chart(fig_brand, use_container_width=True)
+        st.plotly_chart(fig_brand, width='stretch')
     
     with r2c2:
         st.markdown("##### 🏢 Value by Owning Entity")
@@ -1786,7 +1786,7 @@ def render_analytics():
         )
         fig_entity = _plotly_layout_defaults(fig_entity, height=max(350, len(entity_df) * 28 + 60))
         fig_entity.update_layout(showlegend=False)
-        st.plotly_chart(fig_entity, use_container_width=True)
+        st.plotly_chart(fig_entity, width='stretch')
     
     st.markdown("---")
     
@@ -1810,7 +1810,8 @@ def render_analytics():
     for cat in ['GOOD', 'QUARANTINE', 'DEFECTIVE']:
         cat_data = wh_cat_df[wh_cat_df['category'] == cat]
         # Ensure all warehouses present
-        cat_data = wh_df[['warehouse_name']].merge(cat_data, on='warehouse_name', how='left').fillna(0)
+        cat_data = wh_df[['warehouse_name']].merge(cat_data, on='warehouse_name', how='left')
+        cat_data['value'] = cat_data['value'].fillna(0)
         label = {'GOOD': '📗 Good', 'QUARANTINE': '📙 Quarantine', 'DEFECTIVE': '📕 Defective'}
         fig_wh.add_trace(go.Bar(
             x=cat_data['warehouse_name'],
@@ -1827,7 +1828,7 @@ def render_analytics():
         xaxis_tickangle=-30,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
     )
-    st.plotly_chart(fig_wh, use_container_width=True)
+    st.plotly_chart(fig_wh, width='stretch')
     
     st.markdown("---")
     
@@ -1861,7 +1862,7 @@ def render_analytics():
             xaxis_title='', yaxis_title='Items',
             showlegend=False,
         )
-        st.plotly_chart(fig_age, use_container_width=True)
+        st.plotly_chart(fig_age, width='stretch')
     
     with r4c2:
         st.markdown("##### 💰 Aging Distribution (Value)")
@@ -1880,7 +1881,7 @@ def render_analytics():
             xaxis_title='', yaxis_title='Value (USD)',
             showlegend=False,
         )
-        st.plotly_chart(fig_age_v, use_container_width=True)
+        st.plotly_chart(fig_age_v, width='stretch')
     
     st.markdown("---")
     
@@ -1922,7 +1923,7 @@ def render_analytics():
         yaxis_title='',
         showlegend=False,
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, width='stretch')
     
     st.markdown("---")
     
@@ -1958,7 +1959,7 @@ def render_analytics():
         yaxis_title='',
         showlegend=False,
     )
-    st.plotly_chart(fig_heat_exp, use_container_width=True)
+    st.plotly_chart(fig_heat_exp, width='stretch')
 
 
 # ============================================================================
@@ -2008,17 +2009,17 @@ def main():
             
             # Apply expiry status filter client-side
             if expiry_filter != 'All' and not df.empty and 'expiry_date' in df.columns:
-                today = get_vietnam_today()
+                today = pd.Timestamp(get_vietnam_today())
                 expiry_dates = pd.to_datetime(df['expiry_date'], errors='coerce')
                 
                 if expiry_filter == 'Expired':
-                    df = df[expiry_dates.dt.date < today].reset_index(drop=True)
+                    df = df[expiry_dates < today].reset_index(drop=True)
                 elif expiry_filter == 'Near Expiry':
                     near_cutoff = today + timedelta(days=90)
-                    df = df[(expiry_dates.dt.date >= today) & (expiry_dates.dt.date <= near_cutoff)].reset_index(drop=True)
+                    df = df[(expiry_dates >= today) & (expiry_dates <= near_cutoff)].reset_index(drop=True)
                 elif expiry_filter == 'OK':
                     near_cutoff = today + timedelta(days=90)
-                    df = df[expiry_dates.dt.date > near_cutoff].reset_index(drop=True)
+                    df = df[expiry_dates > near_cutoff].reset_index(drop=True)
                 elif expiry_filter == 'No Expiry':
                     df = df[expiry_dates.isna()].reset_index(drop=True)
             
