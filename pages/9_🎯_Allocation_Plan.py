@@ -242,13 +242,16 @@ def show_header():
         st.info(f"🔒 Your role '{user_role}' has view-only access. Contact supply chain team for allocation requests.")
 
 # ==================== METRICS ====================
-def get_supply_status_indicator(total_demand, total_supply):
-    """Get visual status indicator for supply vs demand"""
-    if total_supply >= total_demand:
+def get_supply_status_indicator(total_demand, total_supply, usable_supply=None):
+    """Get visual status indicator for supply vs demand (based on usable supply)"""
+    # Use usable_supply if provided, otherwise fall back to total_supply
+    effective_supply = usable_supply if usable_supply is not None else total_supply
+    
+    if effective_supply >= total_demand:
         return "🟢", "Sufficient"
-    elif total_supply >= total_demand * 0.5:
+    elif effective_supply >= total_demand * 0.5:
         return "🟡", "Partial"
-    elif total_supply > 0:
+    elif effective_supply > 0:
         return "🔴", "Low"
     else:
         return "⚫", "No Supply"
@@ -258,44 +261,68 @@ def show_metrics_row():
     try:
         metrics = allocation_data.get_dashboard_metrics_product_view()
         
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        products_with_expired = metrics.get('products_with_expired', 0)
+        has_expired = products_with_expired > 0
         
-        with col1:
+        # Dynamic columns: add Usable Supply and Expired metrics when applicable
+        num_cols = 8 if has_expired else 6
+        cols = st.columns(num_cols)
+        
+        with cols[0]:
             st.metric(
                 "Total Products",
                 format_number(metrics.get('total_products', 0)),
                 help="Number of unique products with pending customer orders"
             )
         
-        with col2:
+        with cols[1]:
             st.metric(
                 "Total Demand",
                 format_number(metrics.get('total_demand_qty', 0)),
                 help="Total quantity required across all pending orders (standard UOM)"
             )
         
-        with col3:
+        with cols[2]:
             st.metric(
                 "Total Supply",
                 format_number(metrics.get('total_supply_qty', 0)),
-                help="Total available quantity from all sources"
+                help="Total available quantity from all sources (including expired)" if has_expired else "Total available quantity from all sources"
             )
         
-        with col4:
+        col_idx = 3
+        if has_expired:
+            with cols[col_idx]:
+                st.metric(
+                    "✅ Usable Supply",
+                    format_number(metrics.get('total_usable_supply_qty', 0)),
+                    help="Total supply excluding expired inventory"
+                )
+            col_idx += 1
+            
+            with cols[col_idx]:
+                st.metric(
+                    "⚠️ Expired Stock",
+                    format_number(products_with_expired),
+                    help="Number of products with expired inventory in stock",
+                    delta="Products" if products_with_expired > 0 else None
+                )
+            col_idx += 1
+        
+        with cols[col_idx]:
             st.metric(
                 "🔴 Critical Items",
                 format_number(metrics.get('critical_products', 0)),
-                help="Products where available supply is less than 20% of demand"
+                help="Products where usable supply is less than 20% of demand"
             )
         
-        with col5:
+        with cols[col_idx + 1]:
             st.metric(
                 "⚠️ Urgent ETD",
                 format_number(metrics.get('urgent_etd_count', 0)),
                 help="Products with at least one order due within the next 7 days"
             )
         
-        with col6:
+        with cols[col_idx + 2]:
             st.metric(
                 "⚡ Over-Allocated",
                 format_number(metrics.get('over_allocated_count', 0)),
@@ -679,11 +706,25 @@ def show_demand_info(row):
     st.caption(f"{row['oc_count']} OCs pending")
 
 def show_supply_info(row):
-    """Show supply information"""
-    st.markdown(f"**{format_number(row['total_supply'])} {row['standard_uom']}**")
+    """Show supply information with usable vs total distinction"""
+    usable_supply = row.get('usable_supply', row['total_supply'])
+    expired_qty = row.get('expired_inventory_qty', 0)
+    has_expired = row.get('has_expired_inventory', False)
+    
+    # Show usable supply as primary metric
+    if has_expired and expired_qty > 0:
+        st.markdown(f"**{format_number(usable_supply)} {row['standard_uom']}**")
+        st.caption(f"⚠️ +{format_number(expired_qty)} expired")
+    else:
+        st.markdown(f"**{format_number(row['total_supply'])} {row['standard_uom']}**")
+    
     supply_breakdown = []
     if row['inventory_qty'] > 0:
-        supply_breakdown.append(f"Inv: {format_number(row['inventory_qty'])}")
+        inv_label = f"Inv: {format_number(row['inventory_qty'])}"
+        if has_expired and expired_qty > 0:
+            usable_inv = row['inventory_qty'] - expired_qty
+            inv_label = f"Inv: {format_number(usable_inv)} usable"
+        supply_breakdown.append(inv_label)
     if row['can_qty'] > 0:
         supply_breakdown.append(f"CAN: {format_number(row['can_qty'])}")
     if row['po_qty'] > 0:
@@ -693,9 +734,15 @@ def show_supply_info(row):
     st.caption(" | ".join(supply_breakdown) if supply_breakdown else "No supply")
 
 def show_status_indicator(row):
-    """Show status indicator"""
-    indicator, status = get_supply_status_indicator(row['total_demand'], row['total_supply'])
-    st.markdown(f"{indicator}", help=f"Supply Status: {status}")
+    """Show status indicator based on usable supply"""
+    usable_supply = row.get('usable_supply', row['total_supply'])
+    indicator, status = get_supply_status_indicator(row['total_demand'], row['total_supply'], usable_supply)
+    
+    help_text = f"Supply Status: {status}"
+    if row.get('has_expired_inventory') and row.get('expired_inventory_qty', 0) > 0:
+        help_text += f"\n⚠️ Includes {format_number(row['expired_inventory_qty'])} {row['standard_uom']} expired inventory"
+    
+    st.markdown(f"{indicator}", help=help_text)
 
 def show_product_details(product_row):
     """Show expanded product details with OCs and supply sources"""
@@ -1019,35 +1066,86 @@ def show_product_supply_details(product_id):
     
     # Show overview
     st.markdown("### 📊 Supply Overview")
-    overview_cols = st.columns(4)
+    
+    # Check for expired inventory
+    has_expired = supply_summary.get('has_expired', False)
+    expired_qty = supply_summary.get('expired_supply', 0)
+    usable_supply = supply_summary.get('usable_supply', supply_summary['total_supply'])
+    
+    # Expired inventory warning banner
+    if has_expired and expired_qty > 0:
+        st.warning(
+            f"⚠️ **{format_number(expired_qty)} {standard_uom} expired inventory detected!** "
+            f"Usable supply is {format_number(usable_supply)} {standard_uom} "
+            f"(total {format_number(supply_summary['total_supply'])} {standard_uom} minus {format_number(expired_qty)} {standard_uom} expired). "
+            f"SOFT allocation is capped to usable supply. Use HARD allocation for clearance/expired stock orders."
+        )
+    
+    overview_cols = st.columns(5 if has_expired else 4)
     
     with overview_cols[0]:
-        st.metric("Total Supply", f"{format_number(supply_summary['total_supply'])} {standard_uom}")
+        if has_expired:
+            st.metric(
+                "Total Supply", 
+                f"{format_number(supply_summary['total_supply'])} {standard_uom}",
+                help="Total supply from all sources (including expired inventory)"
+            )
+        else:
+            st.metric("Total Supply", f"{format_number(supply_summary['total_supply'])} {standard_uom}")
     
-    with overview_cols[1]:
+    if has_expired:
+        with overview_cols[1]:
+            st.metric(
+                "✅ Usable Supply", 
+                f"{format_number(usable_supply)} {standard_uom}",
+                delta=f"-{format_number(expired_qty)} expired" if expired_qty > 0 else None,
+                delta_color="inverse",
+                help="Supply excluding expired inventory. This is the actual supply available for SOFT allocation."
+            )
+    
+    # Dynamic column index: shifts by 1 when expired section is shown
+    col_offset = 2 if has_expired else 1
+    
+    with overview_cols[col_offset]:
         committed_help = (
-        "Already allocated but not yet delivered\n\n"
-        "Formula:\n" 
-        "Committed = Σ MIN(pending_delivery, undelivered_allocated)\n\n"
-        "This prevents over-blocking supply when delivery data is incomplete"
-    )
+            "Already allocated but not yet delivered\n\n"
+            "Formula:\n" 
+            "Committed = Σ MIN(pending_delivery, undelivered_allocated)\n\n"
+            "This prevents over-blocking supply when delivery data is incomplete"
+        )
         st.metric("Committed", f"{format_number(supply_summary['total_committed'])} {standard_uom}", help=committed_help)
     
-    with overview_cols[2]:
+    with overview_cols[col_offset + 1]:
         availability_color = "🟢" if supply_summary['coverage_ratio'] > 50 else "🟡" if supply_summary['coverage_ratio'] > 20 else "🔴"
+        available_help = (
+            "Usable supply minus committed quantity.\n"
+            "This is the maximum you can allocate via SOFT allocation."
+        ) if has_expired else "Available supply for new allocations"
         st.metric(
             f"{availability_color} Available",
             f"{format_number(supply_summary['available'])} {standard_uom}",
-            delta=f"{supply_summary['coverage_ratio']:.0f}% of total"
+            delta=f"{supply_summary['coverage_ratio']:.0f}% of usable" if has_expired else f"{supply_summary['coverage_ratio']:.0f}% of total",
+            help=available_help
         )
     
-    with overview_cols[3]:
-        st.metric("Max SOFT Allocation", f"{format_number(supply_summary['available'])} {standard_uom}")
+    with overview_cols[col_offset + 2]:
+        st.metric(
+            "Max SOFT Allocation", 
+            f"{format_number(supply_summary['available'])} {standard_uom}",
+            help="Based on usable (non-expired) supply minus committed. For expired/clearance stock, use HARD allocation." if has_expired else "Maximum quantity for SOFT allocation"
+        )
     
     if supply_summary['available'] <= 0:
-        st.error("❌ No supply available for allocation")
+        if has_expired and supply_summary.get('total_available', 0) > 0:
+            st.error(
+                f"❌ No usable supply available for SOFT allocation. "
+                f"However, {format_number(supply_summary['total_available'])} {standard_uom} "
+                f"exists including expired stock. Use HARD allocation to assign expired inventory for clearance orders."
+            )
+        else:
+            st.error("❌ No supply available for allocation")
     elif supply_summary['coverage_ratio'] < 20:
-        st.warning(f"⚠️ Low supply availability! Only {supply_summary['coverage_ratio']:.0f}% available")
+        st.warning(f"⚠️ Low supply availability! Only {supply_summary['coverage_ratio']:.0f}% of usable supply available")
     
     st.divider()
     
@@ -1082,20 +1180,34 @@ def show_supply_type_summary(product_id, supply_type, standard_uom):
         df = supply_data.get_inventory_summary(product_id)
         if not df.empty:
             for _, item in df.iterrows():
-                # ===== BUILD LABEL WITH WAREHOUSE =====
+                is_expired = item.get('is_expired', 0)
+                expiry_status = item.get('expiry_status', 'OK')
+                
+                # ===== BUILD LABEL WITH WAREHOUSE + EXPIRY STATUS =====
                 label = f"Batch {item['batch_number']}"
                 if item.get('warehouse_name'):
-                    label += f" | {item['warehouse_name']}"  # ← WAREHOUSE NAME
+                    label += f" | {item['warehouse_name']}"
+                
+                # Mark expired items clearly
+                if is_expired:
+                    label = f"⛔ {label} [EXPIRED]"
+                elif expiry_status == 'Expiring Soon':
+                    label = f"⚠️ {label} [Expiring Soon]"
                 
                 st.metric(
                     label,
                     f"{format_number(item['available_quantity'])} {standard_uom}",
-                    delta=f"Exp: {format_date(item['expiry_date'])}"
+                    delta=f"Exp: {format_date(item['expiry_date'])}" if not is_expired else f"❌ Expired: {format_date(item['expiry_date'])}",
+                    delta_color="inverse" if is_expired else "off"
                 )
                 
                 # ===== SHOW LOCATION =====
                 if item.get('location'):
-                    st.caption(f"📍 Location: {item['location']}")  # ← LOCATION
+                    st.caption(f"📍 Location: {item['location']}")
+                
+                # Expired inventory guidance
+                if is_expired:
+                    st.caption("💡 Use HARD allocation for clearance/expired stock orders")
         else:
             st.caption("No inventory")
     

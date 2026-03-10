@@ -927,16 +927,19 @@ class AllocationService:
         if mode == 'SOFT':
             supply_summary = self._get_product_supply_summary(conn, product_id)
             available_supply = self._to_decimal(supply_summary['available'])
+            usable_supply = self._to_decimal(supply_summary.get('usable_supply', supply_summary['total_supply']))
             
             if total_to_allocate > available_supply:
                 return {
                     'valid': False,
                     'error': (
-                        f"Insufficient supply for SOFT allocation. "
-                        f"Available: {self._to_float(available_supply):.0f} {standard_uom}, "
+                        f"Insufficient usable supply for SOFT allocation. "
+                        f"Usable available: {self._to_float(available_supply):.0f} {standard_uom}, "
                         f"Requested: {self._to_float(total_to_allocate):.0f} {standard_uom}\n"
-                        f"(Total supply: {self._to_float(supply_summary['total_supply']):.0f}, "
-                        f"Already committed: {self._to_float(supply_summary['total_committed']):.0f})"
+                        f"(Usable supply: {self._to_float(usable_supply):.0f}, "
+                        f"Already committed: {self._to_float(supply_summary['total_committed']):.0f})\n"
+                        f"Note: Expired inventory is excluded from SOFT allocation. "
+                        f"Use HARD allocation for clearance/expired stock orders."
                     )
                 }
         else:  # HARD allocation
@@ -1080,16 +1083,20 @@ class AllocationService:
         return self._to_decimal(result[0] if result else 0)
     
     def _get_product_supply_summary(self, conn, product_id: int) -> Dict[str, Decimal]:
-        """Get supply summary for a product"""
+        """Get supply summary for a product (usable supply excludes expired inventory)"""
         total_supply = self._get_total_product_supply(conn, product_id)
+        usable_supply = self._get_usable_product_supply(conn, product_id)
         total_committed = self._get_total_product_commitment(conn, product_id)
-        available = total_supply - total_committed
+        
+        # Available for SOFT allocation = usable supply - committed
+        available = usable_supply - total_committed
         
         return {
             'total_supply': total_supply,
+            'usable_supply': usable_supply,
             'total_committed': total_committed,
             'available': available,
-            'coverage_ratio': (available / total_supply * 100) if total_supply > 0 else Decimal('0')
+            'coverage_ratio': (available / usable_supply * 100) if usable_supply > 0 else Decimal('0')
         }
     
     def _get_total_product_supply(self, conn, product_id: int) -> Decimal:
@@ -1125,7 +1132,44 @@ class AllocationService:
         result = conn.execute(query, {'product_id': product_id}).fetchone()
         return self._to_decimal(result[0] if result else 0)
     
-    def _get_total_product_commitment(self, conn, product_id: int) -> Decimal:
+    def _get_usable_product_supply(self, conn, product_id: int) -> Decimal:
+        """
+        Get usable (non-expired) supply for a product.
+        Excludes expired inventory but includes all other sources.
+        Used as the cap for SOFT allocation.
+        """
+        query = text("""
+            SELECT 
+                CAST(COALESCE(SUM(usable_supply), 0) AS DECIMAL(15,2)) as usable_supply
+            FROM (
+                -- Only non-expired inventory
+                SELECT SUM(remaining_quantity) as usable_supply
+                FROM inventory_detailed_view
+                WHERE product_id = :product_id AND remaining_quantity > 0
+                  AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)
+                
+                UNION ALL
+                
+                SELECT SUM(pending_quantity) as usable_supply
+                FROM can_pending_stockin_view
+                WHERE product_id = :product_id AND pending_quantity > 0
+                
+                UNION ALL
+                
+                SELECT SUM(pending_standard_arrival_quantity) as usable_supply
+                FROM purchase_order_full_view
+                WHERE product_id = :product_id AND pending_standard_arrival_quantity > 0
+                
+                UNION ALL
+                
+                SELECT SUM(transfer_quantity) as usable_supply
+                FROM warehouse_transfer_details_view
+                WHERE product_id = :product_id AND is_completed = 0 AND transfer_quantity > 0
+            ) usable_union
+        """)
+        
+        result = conn.execute(query, {'product_id': product_id}).fetchone()
+        return self._to_decimal(result[0] if result else 0)
         """
         Get total committed quantity for a product
         IMPROVED: Uses MIN logic from outbound_oc_pending_delivery_view

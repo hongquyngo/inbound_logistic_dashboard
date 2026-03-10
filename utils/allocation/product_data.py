@@ -323,17 +323,17 @@ class ProductData:
         if not filters:
             return having_conditions
         
-        # Supply status filter (requires aggregate data)
+        # Supply status filter (requires aggregate data - now based on usable_supply)
         if filters.get('supply_status'):
             status = filters['supply_status']
             if status == 'sufficient':
-                having_conditions.append("(total_supply >= total_demand AND total_demand > 0)")
+                having_conditions.append("(usable_supply >= total_demand AND total_demand > 0)")
             elif status == 'partial':
-                having_conditions.append("(total_supply >= total_demand * 0.5 AND total_supply < total_demand AND total_demand > 0)")
+                having_conditions.append("(usable_supply >= total_demand * 0.5 AND usable_supply < total_demand AND total_demand > 0)")
             elif status == 'low':
-                having_conditions.append("(total_supply > 0 AND total_supply < total_demand * 0.5 AND total_demand > 0)")
+                having_conditions.append("(usable_supply > 0 AND usable_supply < total_demand * 0.5 AND total_demand > 0)")
             elif status == 'no_supply':
-                having_conditions.append("(total_supply = 0 OR total_supply IS NULL)")
+                having_conditions.append("(usable_supply = 0 OR usable_supply IS NULL)")
         
         return having_conditions
     
@@ -380,14 +380,27 @@ class ProductData:
                     SELECT 
                         product_id,
                         SUM(CASE WHEN source_type = 'INVENTORY' THEN quantity ELSE 0 END) as inventory_qty,
+                        SUM(CASE WHEN source_type = 'INVENTORY_EXPIRED' THEN quantity ELSE 0 END) as expired_inventory_qty,
                         SUM(CASE WHEN source_type = 'CAN' THEN quantity ELSE 0 END) as can_qty,
                         SUM(CASE WHEN source_type = 'PO' THEN quantity ELSE 0 END) as po_qty,
                         SUM(CASE WHEN source_type = 'WHT' THEN quantity ELSE 0 END) as wht_qty,
-                        SUM(quantity) as total_supply
+                        SUM(quantity) as total_supply,
+                        -- Usable = total - expired inventory
+                        SUM(quantity) - SUM(CASE WHEN source_type = 'INVENTORY_EXPIRED' THEN quantity ELSE 0 END) as usable_supply
                     FROM (
+                        -- Non-expired inventory
                         SELECT product_id, 'INVENTORY' as source_type, SUM(remaining_quantity) as quantity
                         FROM inventory_detailed_view
                         WHERE remaining_quantity > 0
+                        GROUP BY product_id
+                        
+                        UNION ALL
+                        
+                        -- Expired inventory (tracked separately)
+                        SELECT product_id, 'INVENTORY_EXPIRED' as source_type, SUM(remaining_quantity) as quantity
+                        FROM inventory_detailed_view
+                        WHERE remaining_quantity > 0
+                          AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE
                         GROUP BY product_id
                         
                         UNION ALL
@@ -428,14 +441,17 @@ class ProductData:
                     pd.earliest_etd,
                     pd.urgent_ocs,
                     COALESCE(ps.inventory_qty, 0) as inventory_qty,
+                    COALESCE(ps.expired_inventory_qty, 0) as expired_inventory_qty,
                     COALESCE(ps.can_qty, 0) as can_qty,
                     COALESCE(ps.po_qty, 0) as po_qty,
                     COALESCE(ps.wht_qty, 0) as wht_qty,
                     COALESCE(ps.total_supply, 0) as total_supply,
+                    COALESCE(ps.usable_supply, 0) as usable_supply,
+                    -- Supply status now based on USABLE supply (excluding expired)
                     CASE 
-                        WHEN COALESCE(ps.total_supply, 0) >= COALESCE(pd.total_demand, 0) THEN 'Sufficient'
-                        WHEN COALESCE(ps.total_supply, 0) >= COALESCE(pd.total_demand, 0) * 0.5 THEN 'Partial'
-                        WHEN COALESCE(ps.total_supply, 0) > 0 THEN 'Low'
+                        WHEN COALESCE(ps.usable_supply, 0) >= COALESCE(pd.total_demand, 0) THEN 'Sufficient'
+                        WHEN COALESCE(ps.usable_supply, 0) >= COALESCE(pd.total_demand, 0) * 0.5 THEN 'Partial'
+                        WHEN COALESCE(ps.usable_supply, 0) > 0 THEN 'Low'
                         ELSE 'No Supply'
                     END as supply_status,
                     CASE 
@@ -443,7 +459,8 @@ class ProductData:
                         ELSE 0
                     END as is_urgent,
                     COALESCE(pd.over_allocated_count, 0) as over_allocated_count,
-                    COALESCE(pd.has_over_allocation, 0) as has_over_allocation
+                    COALESCE(pd.has_over_allocation, 0) as has_over_allocation,
+                    CASE WHEN COALESCE(ps.expired_inventory_qty, 0) > 0 THEN 1 ELSE 0 END as has_expired_inventory
                 FROM products p
                 LEFT JOIN brands b ON p.brand_id = b.id
                 INNER JOIN product_demand pd ON p.id = pd.product_id
@@ -453,7 +470,7 @@ class ProductData:
                 ORDER BY 
                     pd.over_allocated_count DESC,
                     pd.urgent_ocs DESC,
-                    (COALESCE(ps.total_supply, 0) / NULLIF(pd.total_demand, 0)) ASC,
+                    (COALESCE(ps.usable_supply, 0) / NULLIF(pd.total_demand, 0)) ASC,
                     pd.total_value DESC
                 LIMIT :limit OFFSET :offset
             """

@@ -194,10 +194,18 @@ class AllocationData:
                     SELECT 
                         p.id as product_id,
                         COALESCE(SUM(ocpd.pending_standard_delivery_quantity), 0) as demand_qty,
+                        -- Total supply (all sources)
                         COALESCE(inv.inventory_qty, 0) + 
                         COALESCE(can.can_qty, 0) + 
                         COALESCE(po.po_qty, 0) + 
                         COALESCE(wht.wht_qty, 0) as supply_qty,
+                        -- Usable supply (non-expired inventory + all other)
+                        COALESCE(inv_usable.inventory_qty, 0) + 
+                        COALESCE(can.can_qty, 0) + 
+                        COALESCE(po.po_qty, 0) + 
+                        COALESCE(wht.wht_qty, 0) as usable_supply_qty,
+                        -- Expired inventory
+                        COALESCE(inv.inventory_qty, 0) - COALESCE(inv_usable.inventory_qty, 0) as expired_qty,
                         MIN(ocpd.etd) as earliest_etd,
                         MAX(CASE 
                             WHEN ocpd.is_over_committed = 'Yes' OR ocpd.is_pending_over_allocated = 'Yes' 
@@ -211,6 +219,13 @@ class AllocationData:
                         WHERE remaining_quantity > 0
                         GROUP BY product_id
                     ) inv ON p.id = inv.product_id
+                    LEFT JOIN (
+                        SELECT product_id, SUM(remaining_quantity) as inventory_qty
+                        FROM inventory_detailed_view
+                        WHERE remaining_quantity > 0
+                          AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)
+                        GROUP BY product_id
+                    ) inv_usable ON p.id = inv_usable.product_id
                     LEFT JOIN (
                         SELECT product_id, SUM(pending_quantity) as can_qty
                         FROM can_pending_stockin_view
@@ -236,9 +251,11 @@ class AllocationData:
                     COUNT(DISTINCT product_id) as total_products,
                     SUM(demand_qty) as total_demand_qty,
                     SUM(supply_qty) as total_supply_qty,
-                    COUNT(CASE WHEN supply_qty < demand_qty * 0.2 THEN 1 END) as critical_products,
+                    SUM(usable_supply_qty) as total_usable_supply_qty,
+                    COUNT(CASE WHEN usable_supply_qty < demand_qty * 0.2 THEN 1 END) as critical_products,
                     COUNT(CASE WHEN earliest_etd <= DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY) THEN 1 END) as urgent_etd_count,
-                    SUM(has_over_allocation) as over_allocated_count
+                    SUM(has_over_allocation) as over_allocated_count,
+                    COUNT(CASE WHEN expired_qty > 0 THEN 1 END) as products_with_expired
                 FROM product_summary
             """
             
@@ -252,9 +269,11 @@ class AllocationData:
                 'total_products': 0,
                 'total_demand_qty': 0,
                 'total_supply_qty': 0,
+                'total_usable_supply_qty': 0,
                 'critical_products': 0,
                 'urgent_etd_count': 0,
-                'over_allocated_count': 0
+                'over_allocated_count': 0,
+                'products_with_expired': 0
             }
             
         except Exception as e:
@@ -263,7 +282,9 @@ class AllocationData:
                 'total_products': 0,
                 'total_demand_qty': 0,
                 'total_supply_qty': 0,
+                'total_usable_supply_qty': 0,
                 'critical_products': 0,
                 'urgent_etd_count': 0,
-                'over_allocated_count': 0
+                'over_allocated_count': 0,
+                'products_with_expired': 0
             }

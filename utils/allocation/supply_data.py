@@ -46,13 +46,11 @@ class SupplyData:
         try:
             query = text("""
                 WITH supply_summary AS (
-                    -- ===== TOTAL SUPPLY =====
-                    -- Sum from all supply sources: Inventory, CAN, PO, WHT
+                    -- ===== TOTAL SUPPLY (all sources including expired) =====
                     SELECT 
                         'total_supply' as metric,
                         COALESCE(SUM(total_supply), 0) as value
                     FROM (
-                        -- Inventory
                         SELECT SUM(remaining_quantity) as total_supply
                         FROM inventory_detailed_view
                         WHERE product_id = :product_id 
@@ -60,7 +58,6 @@ class SupplyData:
                         
                         UNION ALL
                         
-                        -- Pending CAN (Confirmed Arrival Notice)
                         SELECT SUM(pending_quantity) as total_supply
                         FROM can_pending_stockin_view
                         WHERE product_id = :product_id 
@@ -68,7 +65,6 @@ class SupplyData:
                         
                         UNION ALL
                         
-                        -- Pending PO (Purchase Order)
                         SELECT SUM(pending_standard_arrival_quantity) as total_supply
                         FROM purchase_order_full_view
                         WHERE product_id = :product_id 
@@ -76,7 +72,6 @@ class SupplyData:
                         
                         UNION ALL
                         
-                        -- Warehouse Transfer
                         SELECT SUM(transfer_quantity) as total_supply
                         FROM warehouse_transfer_details_view
                         WHERE product_id = :product_id 
@@ -86,22 +81,63 @@ class SupplyData:
                     
                     UNION ALL
                     
-                    -- ===== COMMITTED (IMPROVED MIN LOGIC) =====
-                    -- Formula: Committed = Σ MIN(pending_delivery, undelivered_allocated)
-                    --
-                    -- Why MIN?
-                    -- - pending_delivery: Actual demand from OC system (source of truth)
-                    -- - undelivered_allocated: From allocation system
-                    -- 
-                    -- During transition, some deliveries may not be linked yet in
-                    -- allocation_delivery_links, causing undelivered_allocated to be
-                    -- higher than actual pending. Using MIN prevents over-blocking supply.
-                    --
+                    -- ===== USABLE SUPPLY (non-expired inventory + all other sources) =====
+                    -- Expired inventory is excluded because it cannot be delivered
+                    -- CAN, PO, WHT are always considered usable (new goods)
+                    SELECT 
+                        'usable_supply' as metric,
+                        COALESCE(SUM(usable_supply), 0) as value
+                    FROM (
+                        -- Only non-expired inventory
+                        SELECT SUM(remaining_quantity) as usable_supply
+                        FROM inventory_detailed_view
+                        WHERE product_id = :product_id 
+                          AND remaining_quantity > 0
+                          AND (expiry_date IS NULL OR expiry_date > CURRENT_DATE)
+                        
+                        UNION ALL
+                        
+                        SELECT SUM(pending_quantity) as usable_supply
+                        FROM can_pending_stockin_view
+                        WHERE product_id = :product_id 
+                          AND pending_quantity > 0
+                        
+                        UNION ALL
+                        
+                        SELECT SUM(pending_standard_arrival_quantity) as usable_supply
+                        FROM purchase_order_full_view
+                        WHERE product_id = :product_id 
+                          AND pending_standard_arrival_quantity > 0
+                        
+                        UNION ALL
+                        
+                        SELECT SUM(transfer_quantity) as usable_supply
+                        FROM warehouse_transfer_details_view
+                        WHERE product_id = :product_id 
+                          AND is_completed = 0 
+                          AND transfer_quantity > 0
+                    ) usable_union
+                    
+                    UNION ALL
+                    
+                    -- ===== EXPIRED INVENTORY ONLY =====
+                    SELECT 
+                        'expired_supply' as metric,
+                        COALESCE(SUM(remaining_quantity), 0) as value
+                    FROM inventory_detailed_view
+                    WHERE product_id = :product_id 
+                      AND remaining_quantity > 0
+                      AND expiry_date IS NOT NULL 
+                      AND expiry_date <= CURRENT_DATE
+                    
+                    UNION ALL
+                    
+                    -- ===== COMMITTED (MIN LOGIC) =====
                     SELECT 
                         'total_committed' as metric,
                         COALESCE(
                             SUM(
-                                GREATEST(0,  -- Ensure non-negative
+                                GREATEST(0,
                                     LEAST(
                                         COALESCE(pending_standard_delivery_quantity, 0),
                                         COALESCE(undelivered_allocated_qty_standard, 0)
@@ -111,13 +147,13 @@ class SupplyData:
                         0) as value
                     FROM outbound_oc_pending_delivery_view
                     WHERE product_id = :product_id
-                      -- Only count OCs with pending delivery
                       AND pending_standard_delivery_quantity > 0
-                      -- Only count if there's actual allocation
                       AND undelivered_allocated_qty_standard > 0
                 )
                 SELECT 
                     MAX(CASE WHEN metric = 'total_supply' THEN value END) as total_supply,
+                    MAX(CASE WHEN metric = 'usable_supply' THEN value END) as usable_supply,
+                    MAX(CASE WHEN metric = 'expired_supply' THEN value END) as expired_supply,
                     MAX(CASE WHEN metric = 'total_committed' THEN value END) as total_committed
                 FROM supply_summary
             """)
@@ -127,31 +163,47 @@ class SupplyData:
                 
                 if result:
                     total_supply = float(result[0] or 0)
-                    total_committed = float(result[1] or 0)
-                    available = total_supply - total_committed
+                    usable_supply = float(result[1] or 0)
+                    expired_supply = float(result[2] or 0)
+                    total_committed = float(result[3] or 0)
+                    
+                    # Available for allocation = usable supply - committed
+                    # (SOFT allocation should only use usable, non-expired supply)
+                    available = usable_supply - total_committed
+                    
+                    # Total available includes expired (for reference only)
+                    total_available = total_supply - total_committed
                     
                     return {
                         'total_supply': total_supply,
+                        'usable_supply': usable_supply,
+                        'expired_supply': expired_supply,
                         'total_committed': total_committed,
-                        'available': available,
-                        'coverage_ratio': (available / total_supply * 100) if total_supply > 0 else 0
+                        'available': available,            # Usable available (for SOFT allocation cap)
+                        'total_available': total_available, # Including expired (for reference)
+                        'coverage_ratio': (available / usable_supply * 100) if usable_supply > 0 else 0,
+                        'has_expired': expired_supply > 0
                     }
             
-            return {
-                'total_supply': 0,
-                'total_committed': 0,
-                'available': 0,
-                'coverage_ratio': 0
-            }
+            return SupplyData._empty_supply_summary()
             
         except Exception as e:
             logger.error(f"Error getting product supply summary: {e}")
-            return {
-                'total_supply': 0,
-                'total_committed': 0,
-                'available': 0,
-                'coverage_ratio': 0
-            }
+            return SupplyData._empty_supply_summary()
+    
+    @staticmethod
+    def _empty_supply_summary() -> Dict[str, Any]:
+        """Return empty supply summary dict"""
+        return {
+            'total_supply': 0,
+            'usable_supply': 0,
+            'expired_supply': 0,
+            'total_committed': 0,
+            'available': 0,
+            'total_available': 0,
+            'coverage_ratio': 0,
+            'has_expired': False
+        }
     
     @st.cache_data(ttl=300)
     def get_supply_with_availability(_self, product_id: int) -> pd.DataFrame:
@@ -283,7 +335,19 @@ class SupplyData:
             SELECT 
                 s.*,
                 COALESCE(c.committed_qty, 0) as committed_quantity,
-                s.total_quantity - COALESCE(c.committed_qty, 0) as available_quantity
+                s.total_quantity - COALESCE(c.committed_qty, 0) as available_quantity,
+                -- Expiry status for inventory items
+                CASE 
+                    WHEN s.source_type = 'INVENTORY' AND s.expiry_date IS NOT NULL AND s.expiry_date <= CURRENT_DATE 
+                    THEN 1 ELSE 0 
+                END as is_expired,
+                CASE 
+                    WHEN s.source_type != 'INVENTORY' THEN 'N/A'
+                    WHEN s.expiry_date IS NULL THEN 'No Expiry'
+                    WHEN s.expiry_date <= CURRENT_DATE THEN 'Expired'
+                    WHEN s.expiry_date <= DATE_ADD(CURRENT_DATE, INTERVAL 30 DAY) THEN 'Expiring Soon'
+                    ELSE 'OK'
+                END as expiry_status
             FROM supply_sources s
             LEFT JOIN commitments c 
                 ON s.source_type = c.supply_source_type 
@@ -294,6 +358,11 @@ class SupplyData:
                     WHEN 'PENDING_CAN' THEN 2
                     WHEN 'PENDING_PO' THEN 3
                     WHEN 'PENDING_WHT' THEN 4
+                END,
+                -- Sort expired inventory last within INVENTORY group
+                CASE 
+                    WHEN s.source_type = 'INVENTORY' AND s.expiry_date IS NOT NULL AND s.expiry_date <= CURRENT_DATE 
+                    THEN 2 ELSE 1
                 END,
                 COALESCE(s.expiry_date, s.arrival_date, s.etd)
             """
@@ -311,7 +380,7 @@ class SupplyData:
     
     @st.cache_data(ttl=300)
     def get_inventory_summary(_self, product_id: int) -> pd.DataFrame:
-        """Get inventory summary for product view"""
+        """Get inventory summary for product view with expiry status"""
         try:
             query = """
                 SELECT 
@@ -323,10 +392,25 @@ class SupplyData:
                     standard_uom,
                     expiry_date,
                     warehouse_name,
-                    location
+                    location,
+                    CASE 
+                        WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE 
+                        THEN 1 ELSE 0 
+                    END as is_expired,
+                    CASE 
+                        WHEN expiry_date IS NULL THEN 'No Expiry'
+                        WHEN expiry_date <= CURRENT_DATE THEN 'Expired'
+                        WHEN expiry_date <= DATE_ADD(CURRENT_DATE, INTERVAL 30 DAY) THEN 'Expiring Soon'
+                        ELSE 'OK'
+                    END as expiry_status
                 FROM inventory_detailed_view
                 WHERE product_id = :product_id AND remaining_quantity > 0
-                ORDER BY expiry_date ASC
+                ORDER BY 
+                    CASE 
+                        WHEN expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE THEN 2
+                        ELSE 1
+                    END,
+                    expiry_date ASC
             """
             
             with _self.engine.connect() as conn:
