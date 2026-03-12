@@ -983,10 +983,17 @@ def show_allocation_action_button(oc):
     supply_summary = supply_data.get_product_supply_summary(product_id)
     has_available_supply = supply_summary.get('available', 0) > 0
     
+    # Also check expired inventory - user can still do HARD allocation with expired stock
+    has_expired_supply = (
+        supply_summary.get('has_expired', False) and 
+        supply_summary.get('expired_supply', 0) > 0
+    )
+    has_any_supply = has_available_supply or has_expired_supply
+    
     can_allocate_more = (
         not is_over_committed and 
         not is_pending_over_allocated and 
-        has_available_supply and
+        has_any_supply and
         pending_qty_standard > undelivered_allocated_qty
     )
     
@@ -996,9 +1003,23 @@ def show_allocation_action_button(oc):
     elif is_pending_over_allocated:
         help_text = "Cannot allocate more - Pending over-allocated"
         button_type = "secondary"
-    elif not has_available_supply:
+    elif not has_any_supply:
         help_text = "No supply available for allocation"
         button_type = "secondary"
+    elif not has_available_supply and has_expired_supply:
+        # Only expired inventory available - enable for HARD allocation
+        remaining_allowed = pending_qty_standard - undelivered_allocated_qty
+        if remaining_allowed > 0:
+            expired_qty = supply_summary.get('expired_supply', 0)
+            help_text = (
+                f"Only expired inventory available ({format_number(expired_qty)} {oc.get('standard_uom')}). "
+                f"Use HARD allocation for clearance orders."
+            )
+            button_type = "primary"
+        else:
+            help_text = "Fully allocated"
+            can_allocate_more = False
+            button_type = "secondary"
     else:
         remaining_allowed = pending_qty_standard - undelivered_allocated_qty
         if remaining_allowed > 0:

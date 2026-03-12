@@ -1170,6 +1170,8 @@ class AllocationService:
         
         result = conn.execute(query, {'product_id': product_id}).fetchone()
         return self._to_decimal(result[0] if result else 0)
+    
+    def _get_total_product_commitment(self, conn, product_id: int) -> Decimal:
         """
         Get total committed quantity for a product
         IMPROVED: Uses MIN logic from outbound_oc_pending_delivery_view
