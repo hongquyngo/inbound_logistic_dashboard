@@ -12,7 +12,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date
 from typing import Optional, List, TYPE_CHECKING
-from utils.config import EMAIL_SENDER, EMAIL_PASSWORD
+from utils.config import config
 from sqlalchemy import text
 import pytz
 
@@ -34,10 +34,13 @@ class CANEmailService:
     def __init__(self, db_engine=None):
         from utils.db import get_db_engine
         self.engine = db_engine or get_db_engine()
-        self.sender_email = EMAIL_SENDER
-        self.sender_password = EMAIL_PASSWORD
-        self.smtp_server = "smtp.gmail.com"
-        self.smtp_port = 587
+        
+        # CAN module uses inbound email credentials
+        email_cfg = config.get_email_config("inbound")
+        self.sender_email = email_cfg["sender"]
+        self.sender_password = email_cfg["password"]
+        self.smtp_server = email_cfg["host"]
+        self.smtp_port = email_cfg["port"]
     
     def get_creator_email(self, arrival_note_number: str) -> Optional[str]:
         """Get creator's email from database"""
