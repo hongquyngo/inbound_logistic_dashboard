@@ -513,11 +513,20 @@ APP_CONFIG = config.app_config
 EXCHANGE_RATE_API_KEY = config.get_api_key("exchange_rate")
 GOOGLE_SERVICE_ACCOUNT_JSON = config.get_google_service_account()
 
-# Email exports
+# Email exports - explicit per module
 INBOUND_EMAIL_CONFIG = config.get_email_config("inbound")
 OUTBOUND_EMAIL_CONFIG = config.get_email_config("outbound")
-EMAIL_SENDER = config.get_email_config("outbound").get("sender")
-EMAIL_PASSWORD = config.get_email_config("outbound").get("password")
+
+# Explicit sender/password per module
+INBOUND_EMAIL_SENDER = config.get_email_config("inbound").get("sender")
+INBOUND_EMAIL_PASSWORD = config.get_email_config("inbound").get("password")
+OUTBOUND_EMAIL_SENDER = config.get_email_config("outbound").get("sender")
+OUTBOUND_EMAIL_PASSWORD = config.get_email_config("outbound").get("password")
+
+# Deprecated: generic aliases kept for backward compatibility only
+# New code should use INBOUND_* or OUTBOUND_* explicitly
+EMAIL_SENDER = OUTBOUND_EMAIL_SENDER
+EMAIL_PASSWORD = OUTBOUND_EMAIL_PASSWORD
 
 __all__ = [
     'config',
@@ -528,8 +537,14 @@ __all__ = [
     'APP_CONFIG',
     'EXCHANGE_RATE_API_KEY',
     'GOOGLE_SERVICE_ACCOUNT_JSON',
-    'EMAIL_SENDER',
-    'EMAIL_PASSWORD',
+    # Email - explicit per module
     'INBOUND_EMAIL_CONFIG',
     'OUTBOUND_EMAIL_CONFIG',
+    'INBOUND_EMAIL_SENDER',
+    'INBOUND_EMAIL_PASSWORD',
+    'OUTBOUND_EMAIL_SENDER',
+    'OUTBOUND_EMAIL_PASSWORD',
+    # Deprecated generic aliases
+    'EMAIL_SENDER',
+    'EMAIL_PASSWORD',
 ]
